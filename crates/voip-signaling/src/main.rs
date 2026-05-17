@@ -3,11 +3,16 @@
 //! Starts the signaling server on the configured port with:
 //!   - axum HTTP server with WebSocket endpoint at `/v1/ws`
 //!   - REST endpoints from spec/08
+//!   - JWT authentication (Ed25519) for WebSocket connections
+//!   - Rate limiting per peer
+//!   - MASQUE relay coordination
 //!   - QUIC listener on 5 IPs for path probing (placeholder)
 //!   - Graceful shutdown via tokio signal
 
 mod error;
 mod handlers;
+mod jwt;
+mod masque;
 mod rate_limit;
 mod server;
 mod session;
@@ -42,6 +47,13 @@ async fn main() {
 
     info!("Three Pillars VoIP Signaling Server starting...");
 
+    // Build VoIP config with server IPs
+    let mut voip_config = voip_core::VoIPConfig::default();
+    voip_config.signaling_server_ips = DEFAULT_SERVER_IPS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
     // Build the signaling server
     let server = SignalingServer::builder()
         .listen_addr("0.0.0.0:8443")
@@ -51,6 +63,7 @@ async fn main() {
                 .map(|s| s.to_string())
                 .collect(),
         )
+        .voip_config(voip_config)
         .build();
 
     let router = server.router();

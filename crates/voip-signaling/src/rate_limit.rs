@@ -124,6 +124,15 @@ impl Default for RateLimitConfig {
     }
 }
 
+/// Actions that can be rate-limited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum Action {
+    Call,
+    Registration,
+    WsMessage,
+}
+
 impl RateLimiter {
     pub fn new(config: RateLimitConfig) -> Self {
         Self {
@@ -180,6 +189,16 @@ impl RateLimiter {
             warn!(peer_id, "WS message rate limit exceeded");
         }
         allowed
+    }
+
+    /// Generic check based on action type.
+    #[allow(dead_code)]
+    pub async fn check(&self, peer_id: &str, action: Action) -> bool {
+        match action {
+            Action::Call => self.check_call(peer_id).await,
+            Action::Registration => self.check_registration(peer_id).await,
+            Action::WsMessage => self.check_ws_message(peer_id).await,
+        }
     }
 
     /// Remove rate-limit state for a disconnected peer.

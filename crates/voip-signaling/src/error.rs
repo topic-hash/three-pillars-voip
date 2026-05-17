@@ -1,6 +1,8 @@
 //! Signaling-specific error types.
 //!
 //! Error codes are defined in spec/08_API_Specification.md §8.5.
+//! Implements conversion to axum HTTP responses for REST endpoints
+//! and to protobuf Error messages (type ID 0x8001) for WebSocket.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -45,6 +47,7 @@ pub struct ErrorResponse {
 // ── Signaling error enum ────────────────────────────────────────────────
 
 #[derive(Debug, Error)]
+#[allow(dead_code)]
 pub enum SignalingError {
     #[error("unknown peer: {0}")]
     UnknownPeer(String),

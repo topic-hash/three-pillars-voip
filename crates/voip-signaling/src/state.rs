@@ -1,20 +1,23 @@
 //! Server-side in-memory state.
 //!
 //! Holds the connected peers registry, active calls registry,
-//! rate-limiting state, and MASQUE proxy coordination data.
+//! rate-limiting state, MASQUE proxy coordination data,
+//! server Ed25519 signing key, and DHT bootstrap nodes.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use prost::Message;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, Mutex, RwLock};
-use tracing::{debug, info, warn};
+use tokio::sync::{mpsc, RwLock};
+use tracing::{debug, info};
 
-use crate::error::{codes, SignalingError};
+use crate::error::SignalingError;
 use crate::rate_limit::{RateLimitConfig, RateLimiter};
+use voip_core::VoIPConfig;
 
 // ── Wire type IDs (2-byte prefix, big-endian) ──────────────────────────
 // See spec/08 §8.1.1
@@ -28,9 +31,11 @@ pub mod type_id {
     pub const CALL_REJECT_SC: u16 = 0x0006;
     pub const CALL_FAILED: u16 = 0x0007; // Either direction
     pub const CALL_ENDED: u16 = 0x0008; // Either direction
+    #[allow(dead_code)]
     pub const PUSH_RETRY: u16 = 0x0009; // Server → Client
     pub const PEER_REGISTER: u16 = 0x0100; // Client → Server
     pub const PEER_UNREGISTER: u16 = 0x0101; // Client → Server
+    #[allow(dead_code)]
     pub const PATH_PROBE_RESPONSE: u16 = 0x0200; // Server → Client (QUIC stream)
     pub const MASQUE_RELAY_NEEDED: u16 = 0x0300; // Server → Client
     pub const ERROR: u16 = 0x8001; // Server → Client
@@ -67,7 +72,7 @@ impl FramedMessage {
 
     /// Build an Error framed message to send to a client.
     pub fn error(code: u32, message: impl Into<String>) -> Self {
-        let payload = voip_core::signaling::Error {
+        let payload = voip_core::proto::signaling::Error {
             code,
             message: message.into(),
         }
@@ -161,12 +166,26 @@ pub struct InnerState {
     /// Known MASQUE proxies.
     pub proxies: RwLock<Vec<ProxyInfo>>,
     /// Signaling server elastic IPs for QUIC path probing.
+    #[allow(dead_code)]
     pub server_ips: Vec<String>,
+    /// Server Ed25519 signing key for JWT.
+    pub signing_key: SigningKey,
+    /// VoIP configuration.
+    pub config: VoIPConfig,
+    /// DHT bootstrap node multiaddresses.
+    pub dht_bootstrap: RwLock<Vec<String>>,
 }
 
 impl AppState {
-    /// Create a new `AppState` with the given rate-limit config and server IPs.
-    pub fn new(rate_limit_config: RateLimitConfig, server_ips: Vec<String>) -> Self {
+    /// Create a new `AppState` with the given rate-limit config, server IPs,
+    /// signing key, and VoIP config.
+    pub fn new(
+        rate_limit_config: RateLimitConfig,
+        server_ips: Vec<String>,
+        signing_key: SigningKey,
+        config: VoIPConfig,
+    ) -> Self {
+        let dht_nodes = config.dht_bootstrap_nodes.clone();
         Self {
             inner: Arc::new(InnerState {
                 peers: RwLock::new(HashMap::new()),
@@ -174,8 +193,16 @@ impl AppState {
                 rate_limiter: RateLimiter::new(rate_limit_config),
                 proxies: RwLock::new(Vec::new()),
                 server_ips,
+                signing_key,
+                config,
+                dht_bootstrap: RwLock::new(dht_nodes),
             }),
         }
+    }
+
+    /// Return the server's verifying key (public key).
+    pub fn verifying_key(&self) -> VerifyingKey {
+        self.inner.signing_key.verifying_key()
     }
 
     // ── Peer operations ────────────────────────────────────────────────
@@ -191,8 +218,6 @@ impl AppState {
         let mut peers = self.inner.peers.write().await;
 
         if let Some(existing) = peers.get_mut(&peer_id) {
-            // Update existing peer — keep the sender if the new one is None
-            // (REST registration should not disconnect an active WS session).
             info!(
                 peer_id = %peer_id,
                 "peer re-registered / updated"
@@ -347,6 +372,7 @@ impl AppState {
     }
 
     /// Add a MASQUE proxy to the known list.
+    #[allow(dead_code)]
     pub async fn add_proxy(&self, proxy: ProxyInfo) {
         self.inner.proxies.write().await.push(proxy);
     }
@@ -359,34 +385,20 @@ impl AppState {
         caller_id: &str,
         callee_id: &str,
     ) -> crate::error::Result<()> {
-        let proxies = self.get_proxies().await;
-        let proxy = proxies
-            .first()
-            .ok_or(SignalingError::MasqueNoProxy)?;
+        crate::masque::send_relay_needed(self, call_id, caller_id, callee_id).await
+    }
 
-        let relay_msg = voip_core::signaling::MasqueRelayNeeded {
-            call_id: call_id.to_owned(),
-            proxy_url: proxy.proxy_url.clone(),
-            wait_timeout_ms: 10_000,
-        };
-        let payload = relay_msg.encode_to_vec();
+    // ── DHT bootstrap ─────────────────────────────────────────────────
 
-        let framed = FramedMessage {
-            type_id: type_id::MASQUE_RELAY_NEEDED,
-            payload,
-        };
-
-        // Send to both peers. If either send fails, return an error.
-        self.send_to_peer(caller_id, framed.clone()).await?;
-        self.send_to_peer(callee_id, framed).await?;
-
-        info!(call_id, caller_id, callee_id, "MASQUE relay coordinated");
-        Ok(())
+    /// Get the list of DHT bootstrap node multiaddresses.
+    pub async fn get_dht_bootstrap(&self) -> Vec<String> {
+        self.inner.dht_bootstrap.read().await.clone()
     }
 
     // ── Utility ────────────────────────────────────────────────────────
 
     /// Return the list of signaling server IPs for QUIC path probing.
+    #[allow(dead_code)]
     pub fn server_ips(&self) -> &[String] {
         &self.inner.server_ips
     }
