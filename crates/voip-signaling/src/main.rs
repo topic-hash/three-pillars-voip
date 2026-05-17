@@ -13,6 +13,8 @@ mod error;
 mod handlers;
 mod jwt;
 mod masque;
+mod push;
+mod quic_probe;
 mod rate_limit;
 mod server;
 mod session;
@@ -74,28 +76,17 @@ async fn main() {
 
     info!(%addr, "HTTP+WS signaling server listening");
 
-    // ── QUIC path probing placeholder ─────────────────────────────
-    // The actual QUIC listener uses quinn on the 5 elastic IPs.
-    // QUIC connections serve dual purpose:
-    //   1. Path probing: server reflects observed client IP:port
-    //      on each migrated path (PathProbeResponse on QUIC stream)
-    //   2. Potential future: raw QUIC signaling as an alternative
-    //      to WebSocket over HTTP.
-    //
-    // Placeholder: spawn a background task that logs readiness.
-    let quic_ips = DEFAULT_SERVER_IPS.to_vec();
+    // ── QUIC path probing ────────────────────────────────────────
+    let quic_probe_config = quic_probe::QuicProbeConfig {
+        server_ips: DEFAULT_SERVER_IPS.iter().map(|s| s.to_string()).collect(),
+        port: 443,
+        max_connections: 100,
+    };
+    let quic_server = quic_probe::QuicProbeServer::new(quic_probe_config);
     tokio::spawn(async move {
-        info!(
-            ips = ?quic_ips,
-            "QUIC path probing placeholder — 5 IPs configured. \
-             Actual quinn listener will be initialized here."
-        );
-        // In production:
-        //   let rustls_cfg = quinn::ServerConfig::with_crypto(...);
-        //   let endpoint = quinn::Endpoint::server(rustls_cfg, ...)?;
-        //   while let Some(conn) = endpoint.accept().await {
-        //       tokio::spawn(handle_quic_connection(conn));
-        //   }
+        if let Err(e) = quic_server.start().await {
+            tracing::error!(error = %e, "QUIC probe server failed");
+        }
     });
 
     // ── Start the axum HTTP server with graceful shutdown ──────────

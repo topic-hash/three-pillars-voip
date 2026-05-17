@@ -54,19 +54,12 @@ pub struct FramedMessage {
 impl FramedMessage {
     /// Encode into the wire format: 2-byte big-endian type ID + prost payload.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(2 + self.payload.len());
-        buf.extend_from_slice(&self.type_id.to_be_bytes());
-        buf.extend_from_slice(&self.payload);
-        buf
+        encode_message(self.type_id, &self.payload)
     }
 
     /// Decode a framed message from the wire format.
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        if data.len() < 2 {
-            return None;
-        }
-        let type_id = u16::from_be_bytes([data[0], data[1]]);
-        let payload = data[2..].to_vec();
+        let (type_id, payload) = decode_message(data).ok()?;
         Some(Self { type_id, payload })
     }
 
@@ -410,6 +403,35 @@ pub fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+// ── Standalone encode / decode functions ───────────────────────────────
+
+/// Encode a message into the wire format: 2-byte big-endian type ID + prost payload.
+///
+/// This is the canonical framing function used by `FramedMessage::to_bytes`
+/// and can also be used directly for constructing raw framed messages
+/// (e.g., PathProbeResponse on QUIC streams).
+pub fn encode_message(type_id: u16, payload: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(2 + payload.len());
+    buf.extend_from_slice(&type_id.to_be_bytes());
+    buf.extend_from_slice(payload);
+    buf
+}
+
+/// Decode a framed message from the wire format.
+///
+/// Returns `(type_id, payload)` on success, or a `SignalingError` if the
+/// input is too short (fewer than 2 bytes for the type prefix).
+pub fn decode_message(data: &[u8]) -> Result<(u16, Vec<u8>), SignalingError> {
+    if data.len() < 2 {
+        return Err(SignalingError::InvalidMessage(
+            "message too short: need at least 2 bytes for type ID".to_owned(),
+        ));
+    }
+    let type_id = u16::from_be_bytes([data[0], data[1]]);
+    let payload = data[2..].to_vec();
+    Ok((type_id, payload))
 }
 
 /// Extract the client's IP address from the connection info.

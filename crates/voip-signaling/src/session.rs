@@ -327,7 +327,7 @@ async fn ws_handle_call_request(
 async fn ws_handle_call_accept(
     payload: &[u8],
     tx: &tokio::sync::mpsc::Sender<FramedMessage>,
-    _peer_id_holder: &std::sync::Arc<tokio::sync::Mutex<Option<String>>>,
+    peer_id_holder: &std::sync::Arc<tokio::sync::Mutex<Option<String>>>,
     state: &AppState,
 ) {
     let msg = match voip_core::proto::signaling::CallAccept::decode(payload) {
@@ -342,6 +342,29 @@ async fn ws_handle_call_accept(
 
     let call_id = msg.call_id.clone();
 
+    // Validate that the sender is the callee (only callee can accept)
+    {
+        let call_entry = match state.get_call(&call_id).await {
+            Some(c) => c,
+            None => {
+                let err = FramedMessage::error(codes::INVALID_CALL_ID, "call not found");
+                let _ = tx.send(err).await;
+                return;
+            }
+        };
+        let pid = peer_id_holder.lock().await;
+        if let Some(ref session_peer) = *pid {
+            if *session_peer != call_entry.callee_id {
+                let err = FramedMessage::error(
+                    codes::NOT_CALL_PARTICIPANT,
+                    "only the callee can accept a call",
+                );
+                let _ = tx.send(err).await;
+                return;
+            }
+        }
+    }
+
     // Update call state to ACCEPTED
     if let Err(e) = state.update_call_state(&call_id, 1).await {
         let err = FramedMessage::error(e.code(), e.to_string());
@@ -352,7 +375,7 @@ async fn ws_handle_call_accept(
     let caller_id = match state.get_call(&call_id).await {
         Some(call) => call.caller_id,
         None => {
-            let err = FramedMessage::error(codes::INVALID_CALL_ID, "call not found");
+            let err = FramedMessage::error(codes::INVALID_CALL_ID, "call not found after state update");
             let _ = tx.send(err).await;
             return;
         }
@@ -378,7 +401,7 @@ async fn ws_handle_call_accept(
 async fn ws_handle_call_reject(
     payload: &[u8],
     tx: &tokio::sync::mpsc::Sender<FramedMessage>,
-    _peer_id_holder: &std::sync::Arc<tokio::sync::Mutex<Option<String>>>,
+    peer_id_holder: &std::sync::Arc<tokio::sync::Mutex<Option<String>>>,
     state: &AppState,
 ) {
     let msg = match voip_core::proto::signaling::CallReject::decode(payload) {
@@ -390,13 +413,29 @@ async fn ws_handle_call_reject(
     };
 
     let call_id = msg.call_id.clone();
-    let caller_id = match state.get_call(&call_id).await {
-        Some(call) => call.caller_id,
-        None => {
-            let err = FramedMessage::error(codes::INVALID_CALL_ID, "call not found");
-            let _ = tx.send(err).await;
-            return;
+
+    // Validate that the sender is the callee (only callee can reject)
+    let caller_id = {
+        let call_entry = match state.get_call(&call_id).await {
+            Some(c) => c,
+            None => {
+                let err = FramedMessage::error(codes::INVALID_CALL_ID, "call not found");
+                let _ = tx.send(err).await;
+                return;
+            }
+        };
+        let pid = peer_id_holder.lock().await;
+        if let Some(ref session_peer) = *pid {
+            if *session_peer != call_entry.callee_id {
+                let err = FramedMessage::error(
+                    codes::NOT_CALL_PARTICIPANT,
+                    "only the callee can reject a call",
+                );
+                let _ = tx.send(err).await;
+                return;
+            }
         }
+        call_entry.caller_id
     };
 
     let _ = state
@@ -429,9 +468,24 @@ async fn ws_handle_call_failed(
 
     let call_id = msg.call_id.clone();
     if let Some(call_entry) = state.get_call(&call_id).await {
-        let other_peer = {
+        // Validate that the sender is a call participant
+        let sending_peer = {
             let pid = peer_id_holder.lock().await;
-            if Some(&call_entry.caller_id) == pid.as_ref() {
+            pid.clone()
+        };
+        if let Some(ref sender) = sending_peer {
+            if sender != &call_entry.caller_id && sender != &call_entry.callee_id {
+                let err = FramedMessage::error(
+                    codes::NOT_CALL_PARTICIPANT,
+                    "not a participant in this call",
+                );
+                let _ = tx.send(err).await;
+                return;
+            }
+        }
+
+        let other_peer = {
+            if Some(&call_entry.caller_id) == sending_peer.as_ref() {
                 call_entry.callee_id.clone()
             } else {
                 call_entry.caller_id.clone()
@@ -445,16 +499,47 @@ async fn ws_handle_call_failed(
         };
         let _ = state.send_to_peer(&other_peer, forward).await;
 
-        // If NAT incompatibility, try MASQUE relay coordination
-        // END_FAILED_IPV4_RANDOM = 3, END_FAILED_UDP_BLOCKED = 4
         let reason_val = msg.reason;
+
+        // If NAT incompatibility or UDP blocked, try MASQUE relay coordination
+        // END_FAILED_IPV4_RANDOM = 3, END_FAILED_UDP_BLOCKED = 4
+        // Per spec/06 §6.7 Step 9: server detects MASQUE need and sends
+        // MasqueRelayNeeded to both peers.
         if reason_val == 3 || reason_val == 4 {
             if let Err(e) = state
                 .coordinate_masque_relay(&call_id, &call_entry.caller_id, &call_entry.callee_id)
                 .await
             {
                 warn!(call_id = %call_id, error = %e, "MASQUE relay coordination failed");
+
+                // If MASQUE coordination failed and the reason is retryable,
+                // send PushRetry to the other peer.
+                if crate::push::is_retryable_reason(reason_val) {
+                    crate::push::handle_retryable_failure(
+                        state,
+                        &call_id,
+                        &call_entry.caller_id,
+                        &call_entry.callee_id,
+                        reason_val,
+                        &other_peer,
+                        call_entry.retry_count,
+                    )
+                    .await;
+                }
             }
+        } else if crate::push::is_retryable_reason(reason_val) {
+            // For other retryable reasons (e.g., END_FAILED_MASQUE_UNREACHABLE = 7)
+            // send PushRetry to the other peer.
+            crate::push::handle_retryable_failure(
+                state,
+                &call_id,
+                &call_entry.caller_id,
+                &call_entry.callee_id,
+                reason_val,
+                &other_peer,
+                call_entry.retry_count,
+            )
+            .await;
         }
 
         let _ = state
@@ -482,9 +567,24 @@ async fn ws_handle_call_ended(
 
     let call_id = msg.call_id.clone();
     if let Some(call_entry) = state.get_call(&call_id).await {
-        let other_peer = {
+        // Validate that the sender is a call participant
+        let sending_peer = {
             let pid = peer_id_holder.lock().await;
-            if Some(&call_entry.caller_id) == pid.as_ref() {
+            pid.clone()
+        };
+        if let Some(ref sender) = sending_peer {
+            if sender != &call_entry.caller_id && sender != &call_entry.callee_id {
+                let err = FramedMessage::error(
+                    codes::NOT_CALL_PARTICIPANT,
+                    "not a participant in this call",
+                );
+                let _ = tx.send(err).await;
+                return;
+            }
+        }
+
+        let other_peer = {
+            if Some(&call_entry.caller_id) == sending_peer.as_ref() {
                 call_entry.callee_id.clone()
             } else {
                 call_entry.caller_id.clone()
