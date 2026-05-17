@@ -1,0 +1,24 @@
+[package]
+name = "voip-signaling"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "voip-signaling-server"
+path = "src/main.rs"
+
+[dependencies]
+voip-core = { path = "../voip-core" }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tokio-tungstenite = { workspace = true }
+prost = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,14 @@
+[package]
+name = "voip-dht"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+voip-core = { path = "../voip-core" }
+libp2p = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+ed25519-dalek = { workspace = true }
+serde = { workspace = true }

@@ -1,0 +1,131 @@
+//! voip-signaling: Signaling server binary for Three Pillars VoIP.
+//!
+//! Starts the signaling server on the configured port with:
+//!   - axum HTTP server with WebSocket endpoint at `/v1/ws`
+//!   - REST endpoints from spec/08
+//!   - QUIC listener on 5 IPs for path probing (placeholder)
+//!   - Graceful shutdown via tokio signal
+
+mod error;
+mod handlers;
+mod rate_limit;
+mod server;
+mod session;
+mod state;
+
+use std::net::SocketAddr;
+
+use server::SignalingServer;
+use tracing::info;
+
+/// Default server IPs for QUIC path probing.
+/// In production, these are 5 elastic IPs on the Oracle Cloud instance.
+const DEFAULT_SERVER_IPS: &[&str] = &[
+    "10.0.0.1",
+    "10.0.0.2",
+    "10.0.0.3",
+    "10.0.0.4",
+    "10.0.0.5",
+];
+
+#[tokio::main]
+async fn main() {
+    // Initialize tracing
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "voip_signaling=info,tower_http=debug".into()),
+        )
+        .with_target(true)
+        .with_thread_ids(true)
+        .init();
+
+    info!("Three Pillars VoIP Signaling Server starting...");
+
+    // Build the signaling server
+    let server = SignalingServer::builder()
+        .listen_addr("0.0.0.0:8443")
+        .server_ips(
+            DEFAULT_SERVER_IPS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        )
+        .build();
+
+    let router = server.router();
+    let addr: SocketAddr = server
+        .listen_addr()
+        .parse()
+        .expect("invalid listen address");
+
+    info!(%addr, "HTTP+WS signaling server listening");
+
+    // ── QUIC path probing placeholder ─────────────────────────────
+    // The actual QUIC listener uses quinn on the 5 elastic IPs.
+    // QUIC connections serve dual purpose:
+    //   1. Path probing: server reflects observed client IP:port
+    //      on each migrated path (PathProbeResponse on QUIC stream)
+    //   2. Potential future: raw QUIC signaling as an alternative
+    //      to WebSocket over HTTP.
+    //
+    // Placeholder: spawn a background task that logs readiness.
+    let quic_ips = DEFAULT_SERVER_IPS.to_vec();
+    tokio::spawn(async move {
+        info!(
+            ips = ?quic_ips,
+            "QUIC path probing placeholder — 5 IPs configured. \
+             Actual quinn listener will be initialized here."
+        );
+        // In production:
+        //   let rustls_cfg = quinn::ServerConfig::with_crypto(...);
+        //   let endpoint = quinn::Endpoint::server(rustls_cfg, ...)?;
+        //   while let Some(conn) = endpoint.accept().await {
+        //       tokio::spawn(handle_quic_connection(conn));
+        //   }
+    });
+
+    // ── Start the axum HTTP server with graceful shutdown ──────────
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .expect("failed to bind TCP listener");
+
+    info!("Signaling server ready — press Ctrl+C to shut down");
+
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .expect("server error");
+}
+
+/// Wait for SIGINT (Ctrl+C) or SIGTERM to initiate graceful shutdown.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {
+            info!("received Ctrl+C, shutting down gracefully...");
+        }
+        _ = terminate => {
+            info!("received SIGTERM, shutting down gracefully...");
+        }
+    }
+}

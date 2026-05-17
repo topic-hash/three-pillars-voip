@@ -1,0 +1,23 @@
+[package]
+name = "voip-client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+voip-core = { path = "../voip-core" }
+quinn = { workspace = true }
+rustls = { workspace = true }
+rcgen = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+h3 = { workspace = true }
+h3-quinn = { workspace = true }
+http = { workspace = true }
+prost = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+rand = { workspace = true }
+opus = { workspace = true }
+ed25519-dalek = { workspace = true }

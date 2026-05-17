@@ -1,0 +1,209 @@
+namespace voip {};
+
+// ============================================================================
+// ENUMS
+// ============================================================================
+
+/// The current state of a VoIP call, observable by the UI layer.
+enum CallState {
+    /// No call in progress.
+    "idle",
+    /// Outgoing call is ringing (waiting for peer to accept).
+    "ringing",
+    /// Incoming call is ringing (waiting for user to accept).
+    "incoming",
+    /// Call is connected — media is flowing.
+    "connected",
+    /// Call has ended.
+    "ended",
+};
+
+/// How the direct P2P connection was established.
+enum ConnectionMethod {
+    /// Not yet connected.
+    "none",
+    /// Direct IPv6 connection.
+    "ipv6_direct",
+    /// IPv4 Cone NAT — QUIC simultaneous open.
+    "ipv4_cone",
+    /// IPv4 Symmetric NAT — QUIC path probing + port prediction.
+    "ipv4_prediction",
+    /// MASQUE CONNECT-UDP relay (RFC 9298) — bidirectional.
+    "masque",
+    /// MASQUE CONNECT-UDP over HTTP/2 (UDP-blocked fallback).
+    "masque_http2",
+};
+
+/// NAT type classification as detected by QUIC path probing.
+enum NATType {
+    /// IPv6, no NAT involved.
+    "none",
+    /// Full-Cone or Restricted-Cone NAT.
+    "cone",
+    /// Symmetric NAT with +1/+2 delta.
+    "symmetric_sequential",
+    /// Symmetric NAT with +1 to +5 delta.
+    "symmetric_pseudo",
+    /// Symmetric NAT with random allocation.
+    "symmetric_random",
+};
+
+/// How a peer was discovered.
+enum DiscoveryMethod {
+    /// Found via DHT lookup.
+    "dht",
+    /// Found via signaling server.
+    "signaling",
+    /// Found in local peer address book cache.
+    "cache",
+};
+
+// ============================================================================
+// RECORDS (data classes)
+// ============================================================================
+
+/// Configuration for the VoIP client, serializable for mobile storage.
+///
+/// See spec/11_Implementation_Stack.md §11.3 for full documentation.
+dictionary VoipConfig {
+    /// Discovery priority: true = DHT first (privacy), false = signaling first (speed).
+    boolean discovery_privacy_first;
+    /// DHT lookup timeout before falling back to signaling (ms).
+    u64 dht_lookup_timeout_ms;
+    /// DHT bootstrap nodes (hardcoded fallback).
+    sequence<string> dht_bootstrap_nodes;
+    /// Signaling server URL.
+    string signaling_server_url;
+    /// Enable MASQUE CONNECT-UDP fallback.
+    boolean masque_fallback_enabled;
+    /// Enable push notification retry for failed connections.
+    boolean push_retry_enabled;
+    /// QUIC connection timeout (ms).
+    u64 quic_connect_timeout_ms;
+    /// Call ring timeout (ms).
+    u64 call_ring_timeout_ms;
+};
+
+/// Information about the current connection method and quality metrics.
+///
+/// Observable by the UI layer to display connection quality.
+dictionary ConnectionInfo {
+    /// How the connection was established.
+    ConnectionMethod method;
+    /// Measured round-trip time in milliseconds.
+    u32 rtt_ms;
+    /// Packet loss percentage (0-100).
+    f32 packet_loss_pct;
+    /// Jitter in milliseconds.
+    u32 jitter_ms;
+    /// How the peer was discovered.
+    DiscoveryMethod discovery_method;
+};
+
+/// Statistics about a completed or in-progress call.
+dictionary CallStats {
+    /// Call duration in seconds.
+    u64 duration_secs;
+    /// Total bytes sent.
+    u64 bytes_sent;
+    /// Total bytes received.
+    u64 bytes_received;
+    /// Total packets sent.
+    u64 packets_sent;
+    /// Total packets received.
+    u64 packets_received;
+    /// Total packets lost.
+    u64 packets_lost;
+};
+
+// ============================================================================
+// MAIN INTERFACE
+// ============================================================================
+
+/// The main VoIP client object exposed to Kotlin/Swift.
+///
+/// This is the primary interface for the mobile application layer.
+/// It manages call lifecycle, connection state, and audio routing.
+///
+/// # Thread Safety
+///
+/// All methods are safe to call from any thread. The underlying
+/// client uses async Rust with tokio for all I/O operations.
+[Trait]
+interface VoipClient {
+    /// Initialize the VoIP client.
+    ///
+    /// Connects to the signaling server, bootstraps the DHT,
+    /// and performs NAT probing. Must be called before any other method.
+    ///
+    /// Returns an error string on failure, or empty string on success.
+    [Throws=VoipError]
+    void init();
+
+    /// Place a call to the given peer.
+    ///
+    /// The peer_id is the hex-encoded Ed25519 public key of the peer.
+    /// Returns immediately; call state transitions are observable via
+    /// `get_call_state()`.
+    [Throws=VoipError]
+    void call(string peer_id);
+
+    /// Hang up the current call.
+    [Throws=VoipError]
+    void hangup();
+
+    /// Mute the local audio (stop sending audio to peer).
+    [Throws=VoipError]
+    void mute();
+
+    /// Unmute the local audio (resume sending audio to peer).
+    [Throws=VoipError]
+    void unmute();
+
+    /// Get the current call state.
+    CallState get_call_state();
+
+    /// Get information about the current connection.
+    ///
+    /// Returns null if not connected.
+    ConnectionInfo? get_connection_info();
+
+    /// Get call statistics.
+    CallStats get_call_stats();
+
+    /// Get whether the client is currently muted.
+    boolean is_muted();
+
+    /// Shut down the client gracefully.
+    ///
+    /// Ends any active call and releases resources.
+    [Throws=VoipError]
+    void shutdown();
+};
+
+// ============================================================================
+// ERROR TYPES
+// ============================================================================
+
+/// Errors that can be raised by the VoIP FFI layer.
+[Error]
+enum VoipError {
+    /// The client is not initialized.
+    "not_initialized",
+    /// A call is already in progress.
+    "call_in_progress",
+    /// No call is currently active.
+    "no_active_call",
+    /// Connection failed.
+    "connection_failed" string,
+    /// Call setup timed out.
+    "call_setup_timeout" string,
+    /// The peer rejected the call.
+    "call_rejected" string,
+    /// NAT traversal failed.
+    "nat_traversal_failed" string,
+    /// MASQUE relay failed.
+    "masque_failed" string,
+    /// Internal error.
+    "internal" string,
+};

@@ -1,0 +1,324 @@
+// Three Pillars VoIP — Signaling Protocol
+// Source of truth for all signaling messages. Do NOT edit the markdown in spec/07;
+// edit THIS file. The markdown is a human-readable rendering of this schema.
+//
+// Wire format: 2-byte message type (uint16, big-endian) + prost-encoded payload
+// See spec/08_API_Specification.md §8.1.1 for type ID assignments.
+//
+// v8.0: MASQUE bidirectional relay model. Both peers connect to proxy.
+//       Signaling server coordinates MASQUE relay (MasqueRelayNeeded).
+//       UDP-blocked fallback via MASQUE over HTTP/2 (TCP).
+//       Proxy accepts both HTTP/3 (QUIC) and HTTP/2 (TCP) on port 443.
+//       Added: PathProbeResponse, PeerRecord, ProxyToken.
+// v7.0: STUN eliminated. QUIC path probing replaces all STUN functions.
+//       DHT discovery layer added. PushRetry for failed-call retry.
+
+syntax = "proto3";
+package voip.signaling;
+
+// ==================== ENUMS ====================
+
+enum NATType {
+  NAT_NONE                    = 0; // IPv6, no NAT involved
+  NAT_CONE                    = 1; // Full-Cone or Restricted-Cone NAT
+  NAT_SYMMETRIC_SEQUENTIAL    = 2; // Symmetric NAT with +1/+2 delta
+  NAT_SYMMETRIC_PSEUDO        = 3; // Symmetric NAT with +1 to +5 delta
+  NAT_SYMMETRIC_RANDOM        = 4; // Symmetric NAT with random allocation
+}
+
+enum PredictionConfidence {
+  SEQUENTIAL        = 0; // Delta is constant, +/-1-2 ports, high confidence
+  PSEUDO_SEQUENTIAL = 1; // Delta varies +1 to +5, +/-5-8 ports, medium confidence
+  RANDOM            = 2; // Cannot predict, do not attempt
+}
+
+enum ProbeMethod {
+  QUIC_PATH_PROBING = 0; // QUIC connection migration to 5 server IPs (v7+)
+}
+
+enum DiscoveryMethod {
+  DISCOVERY_DHT       = 0; // Found via DHT lookup
+  DISCOVERY_SIGNALING = 1; // Found via signaling server
+  DISCOVERY_CACHE     = 2; // Found in local peer address book cache
+}
+
+enum MediaType {
+  MEDIA_AUDIO  = 0;
+  MEDIA_VIDEO  = 1;
+  MEDIA_SCREEN = 2;
+}
+
+enum CallState {
+  CALL_RINGING  = 0;
+  CALL_ACCEPTED = 1;
+  CALL_CONNECTED = 2;
+  CALL_FAILED   = 3;
+  CALL_ENDED    = 4;
+}
+
+enum SubscriptionState {
+  SUB_PENDING = 0;
+  SUB_ACTIVE  = 1;
+  SUB_PAUSED  = 2;
+  SUB_ENDED   = 3;
+}
+
+enum PeerStatus {
+  PEER_ONLINE  = 0;
+  PEER_OFFLINE = 1;
+  PEER_IN_CALL = 2;
+}
+
+enum ConnectionMethod {
+  CONN_NONE            = 0; // Not yet connected
+  CONN_IPV6_DIRECT     = 1; // Direct IPv6 connection
+  CONN_IPV4_CONE       = 2; // IPv4 Cone NAT — QUIC simultaneous open
+  CONN_IPV4_PREDICTION = 3; // IPv4 Symmetric NAT — QUIC path probing + port prediction
+  CONN_MASQUE          = 4; // MASQUE CONNECT-UDP relay (RFC 9298) — bidirectional
+  CONN_MASQUE_HTTP2    = 5; // MASQUE CONNECT-UDP over HTTP/2 (UDP-blocked fallback)
+}
+
+enum CallEndReason {
+  END_NORMAL                    = 0; // Normal call end
+  END_REJECTED                  = 1; // Callee rejected the call
+  END_TIMEOUT                   = 2; // Connection attempt timed out
+  END_FAILED_IPV4_RANDOM        = 3; // Both peers IPv4 Symmetric random, no prediction
+  END_FAILED_UDP_BLOCKED        = 4; // UDP blocked by firewall
+  END_FAILED_NETWORK            = 5; // Network error after connection
+  END_MIGRATION_FAILED          = 6; // Connection migration failed
+  END_FAILED_MASQUE_UNREACHABLE = 7; // All MASQUE proxies unreachable
+  END_FAILED_TCP_BLOCKED         = 8; // UDP blocked AND TCP port 443 blocked — no MASQUE possible
+}
+
+// ==================== COMPOSITE MESSAGES ====================
+
+message PortPrediction {
+  string external_ip           = 1; // External IPv4 address
+  uint32 predicted_port_start  = 2; // Start of predicted range (1024-65535)
+  uint32 predicted_port_end    = 3; // End of predicted range (>= predicted_port_start)
+  PredictionConfidence confidence = 4;
+  uint32 base_port             = 5; // Last known external port from QUIC path probing
+  int32  delta_pattern         = 6; // Average delta (e.g., +1 for sequential)
+  uint64 probed_at             = 7; // Unix timestamp (seconds) of probe
+  ProbeMethod probe_method     = 8; // Always QUIC_PATH_PROBING in v7+
+}
+
+message TrackAnnouncement {
+  string track_namespace = 1; // e.g., "voip/peer-abc/audio/opus-48k"
+  string codec           = 2; // e.g., "opus-48k"
+  uint32 priority        = 3; // MoQ send ordering priority (0 = highest)
+  MediaType media_type   = 4;
+  uint32 bitrate_max     = 5; // Maximum bitrate in bps
+  uint32 bitrate_min     = 6; // Minimum bitrate in bps
+  uint32 frame_duration_ms = 7; // Duration of each media frame
+}
+
+message TrackSubscription {
+  string track_namespace = 1; // The track to subscribe to
+  uint32 track_alias     = 2; // Local 4-byte alias for the subscribed track
+}
+
+message NATInfo {
+  NATType nat_type           = 1;
+  PortPrediction prediction  = 2; // Null if IPv6 or Cone NAT
+}
+
+// ==================== CALL SIGNALING MESSAGES ====================
+// Type IDs for wire framing (2-byte prefix):
+//   CallRequest  = 0x0001 (client→server) / 0x0002 (server→client, forwarded)
+//   CallAccept   = 0x0003 (client→server) / 0x0004 (server→client, forwarded)
+//   CallReject   = 0x0005 (client→server) / 0x0006 (server→client, forwarded)
+//   CallFailed   = 0x0007 (either direction)
+//   CallEnded    = 0x0008 (either direction)
+//   PushRetry    = 0x0009 (server→client)
+
+message CallRequest {
+  string call_id                    = 1; // UUID v4, generated by caller
+  string caller_id                  = 2;
+  string callee_id                  = 3;
+  repeated string ipv6_addresses    = 4; // Caller's current IPv6 addresses
+  repeated string ipv4_reflexive    = 5; // QUIC-path-probe-learned IPv4 addresses (ip:port)
+  NATInfo nat_info                  = 6; // NAT type and prediction
+  repeated TrackAnnouncement tracks = 7; // MoQ tracks this peer offers
+  DiscoveryMethod discovery_method  = 8; // How the caller discovered the callee
+  uint64 timestamp                  = 9; // When this request was created (unix seconds)
+  bytes connection_id               = 10; // 12-byte CSPRNG QUIC Connection ID for this call
+}
+
+message CallAccept {
+  string call_id                    = 1;
+  repeated string ipv6_addresses    = 2; // Callee's IPv6 addresses
+  repeated string ipv4_reflexive    = 3; // QUIC-path-probe-learned IPv4 addresses
+  NATInfo nat_info                  = 4; // Callee's NAT type and prediction
+  repeated TrackAnnouncement tracks = 5; // MoQ tracks callee offers
+  repeated TrackSubscription subscriptions = 6; // Which of caller's tracks to subscribe to
+  uint64 timestamp                  = 7; // When this accept was created (unix seconds)
+}
+
+message CallReject {
+  string call_id       = 1;
+  string reason        = 2; // Human-readable reason
+  CallEndReason end_reason = 3; // Machine-readable reason
+}
+
+message CallFailed {
+  string call_id       = 1;
+  CallEndReason reason = 2;
+  string description   = 3; // Human-readable explanation
+  uint64 timestamp     = 4; // When the failure occurred (unix seconds)
+}
+
+message CallEnded {
+  string call_id           = 1;
+  CallEndReason reason     = 2;
+  uint64 duration_seconds  = 3; // Total call duration
+  ConnectionMethod method  = 4; // How the call was connected (for analytics)
+  DiscoveryMethod discovery_method = 5; // How peer was discovered
+  uint64 timestamp         = 6; // When the call ended (unix seconds)
+}
+
+// ==================== PUSH RETRY ====================
+// Type ID: 0x0009 (server→client only)
+// Sent when a call fails due to NAT incompatibility.
+// Delivered via Firebase Cloud Messaging to wake the peer's app.
+
+message PushRetry {
+  string call_id       = 1;
+  string caller_id     = 2;
+  string callee_id     = 3;
+  CallEndReason reason = 4;
+  uint32 retry_attempt = 5; // 1, 2, or 3
+  uint64 retry_after_ms = 6; // Delay before peer should retry
+}
+
+// ==================== MASQUE PROXY DISCOVERY ====================
+
+message ProxyRecord {
+  string node_id       = 1; // Node running the proxy
+  string proxy_url     = 2; // e.g., "https://proxy.example.com:443/masque"
+  uint32 capacity      = 3; // Max concurrent relay sessions
+  string region        = 4; // Geographic region hint
+  uint32 latency_hint_ms = 5; // Estimated latency in ms
+  uint64 timestamp     = 6; // When this record was published
+  uint32 ttl_seconds   = 7; // Time-to-live for this record
+  string cert_fingerprint = 8; // SHA-256 fingerprint of proxy's TLS certificate (for self-signed certs)
+  bytes signature      = 9; // Ed25519 signature over all fields above
+}
+
+// ==================== DHT PEER RECORD ====================
+// Stored in DHT with key SHA-256("voip:{peer_id}").
+// Signed by the peer's Ed25519 private key.
+
+message PeerRecord {
+  string peer_id                    = 1;  // UUID v4
+  string display_name               = 2;  // Max 128 chars, UTF-8
+  repeated string ipv6_addresses    = 3;
+  repeated string ipv4_reflexive    = 4;  // QUIC-path-probe-learned, ip:port format
+  NATInfo nat_info                  = 5;
+  repeated TrackAnnouncement tracks = 6;
+  PeerStatus status                 = 7;
+  uint64 timestamp                  = 8;  // When this record was published
+  uint32 ttl_seconds                = 9;  // Time-to-live for this record
+  bytes signature                   = 10; // Ed25519 signature over all fields above
+}
+
+// ==================== PATH PROBE RESPONSE ====================
+// Type ID: 0x0200 (server→client only)
+// Sent on the QUIC stream when the client migrates its connection
+// to a different signaling server IP for NAT classification.
+
+message PathProbeResponse {
+  string server_ip     = 1; // The signaling server IP the client migrated to
+  string observed_ip   = 2; // The client's external IP as seen from this server IP
+  uint32 observed_port = 3; // The client's external port as seen from this server IP
+  uint64 timestamp_ms  = 4; // When this observation was made (unix milliseconds)
+}
+
+// ==================== MASQUE RELAY COORDINATION ====================
+// Type ID: 0x0300 (server→client only)
+// Sent to both peers when direct P2P fails and MASQUE relay is needed.
+// Informs peers to connect to the specified MASQUE proxy.
+
+message MasqueRelayNeeded {
+  string call_id       = 1; // The call that needs relay
+  string proxy_url     = 2; // MASQUE proxy endpoint to connect to
+  uint32 wait_timeout_ms = 3; // Max time to wait for peer to also connect to proxy (default: 10000)
+}
+
+// ==================== PROXY TOKEN (Anti-Abuse) ====================
+// Issued by the signaling server, presented to the MASQUE proxy.
+// Optional — proxies that require anti-abuse verification use this.
+
+message ProxyToken {
+  string peer_id       = 1; // The peer this token is issued to
+  string target_peer_id = 2; // The peer being called (justifies the relay)
+  uint64 issued_at     = 3; // When this token was issued (unix seconds)
+  uint32 ttl_seconds   = 4; // Token validity duration (default: 60)
+  bytes signature      = 5; // Signaling server's Ed25519 signature over fields 1-4
+}
+
+
+
+// ==================== REGISTRATION MESSAGES ====================
+// Type IDs for wire framing:
+//   PeerRegister   = 0x0100 (client→server)
+//   PeerUnregister = 0x0101 (client→server)
+
+message PeerRegister {
+  string peer_id                    = 1; // UUID v4, immutable
+  string display_name               = 2; // Max 128 chars, UTF-8
+  repeated string ipv6_addresses    = 3;
+  repeated string ipv4_reflexive    = 4; // QUIC-path-probe-learned, ip:port format
+  NATInfo nat_info                  = 5;
+  repeated TrackAnnouncement tracks = 6; // At least 1 (audio)
+  PeerStatus status                 = 7;
+  string fcm_token                  = 8; // Firebase Cloud Messaging token for push retry
+}
+
+message PeerUnregister {
+  string peer_id = 1;
+}
+
+// ==================== IN-CHANNEL SIGNALING (on QUIC stream) ====================
+// These messages are sent on the reliable QUIC stream after the call is connected.
+// They are NOT sent over the WebSocket — they ride directly on the P2P QUIC connection.
+
+message InChannelMessage {
+  oneof payload {
+    ConnectionMigration connection_migration = 1;
+    TrackUpdate track_update                = 2; // Add/remove tracks during call
+    QualityReport quality_report            = 3; // MoQ quality feedback
+  }
+}
+
+message ConnectionMigration {
+  repeated string new_ipv6_addresses = 1;
+  repeated string new_ipv4_reflexive = 2;
+  PortPrediction new_prediction      = 3; // If IPv4 and NAT changed
+}
+
+message TrackUpdate {
+  repeated TrackAnnouncement added      = 1; // New tracks being published
+  repeated string removed               = 2; // Track namespaces being removed
+  repeated TrackSubscription subscribed = 3; // New subscriptions
+  repeated uint32 unsubscribed          = 4; // Track aliases being unsubscribed
+}
+
+message QualityReport {
+  uint32 track_alias          = 1;
+  uint32 packets_received     = 2;
+  uint32 packets_lost         = 3;
+  uint32 bytes_received       = 4;
+  uint32 average_rtt_ms       = 5;
+  uint32 jitter_ms            = 6;
+  uint64 report_period_start  = 7; // Unix timestamp (seconds)
+  uint64 report_period_end    = 8; // Unix timestamp (seconds)
+}
+
+// ==================== ERROR MESSAGE ====================
+// Type ID: 0x8001 (server→client only)
+
+message Error {
+  uint32 code    = 1; // See spec/08_API_Specification.md §8.1.1 for error codes
+  string message = 2; // Human-readable error description
+}

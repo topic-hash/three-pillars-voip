@@ -1,0 +1,31 @@
+// Three Pillars VoIP — Internal NAT Probe Messages
+// These messages are NOT sent on the wire. They are used internally
+// by the voip-client NAT probe module to serialize probe results to
+// local cache (e.g., sled, flat file, or in-memory store).
+// They are never transmitted between peers or to the signaling server.
+//
+// v7.0: STUN eliminated. All probes use QUIC path probing
+//       (connection migration to signaling server's 5 elastic IPs).
+
+syntax = "proto3";
+package voip.internal;
+
+import "signaling.proto";
+
+message NATProbeResult {
+  string server_ip    = 1; // Signaling server IP probed via QUIC path migration
+  uint32 local_port   = 2; // Local port used for the QUIC connection (1024-65535)
+  string external_ip  = 3; // External IPv4 reflected by signaling server
+  uint32 external_port = 4; // External port reflected by signaling server (1024-65535)
+  uint64 timestamp_ms = 5; // When the probe was sent (unix milliseconds)
+  uint32 rtt_ms       = 6; // Round-trip time of the QUIC path migration in milliseconds
+}
+
+message NATProbeCache {
+  repeated NATProbeResult probes = 1; // All probe results used to compute prediction
+  int32  average_delta            = 2; // Average port delta across probes
+  int32  delta_variance           = 3; // Standard deviation of deltas
+  voip.signaling.PredictionConfidence confidence = 4; // Classification result
+  uint64 cache_timestamp          = 5; // When the cache was last updated (unix ms)
+  uint32 cache_ttl_seconds        = 6; // Time-to-live for this cache entry
+}
