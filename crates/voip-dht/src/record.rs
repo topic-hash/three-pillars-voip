@@ -6,16 +6,31 @@
 //!
 //! # DHT Key Scheme
 //!
-//! | Record Type  | DHT Key                            | Value                       |
-//! |-------------|-------------------------------------|-----------------------------|
-//! | PeerRecord  | `SHA-256("voip:{peer_id}")`         | Signed PeerRecord (protobuf) |
-//! | UsernameRecord | `SHA-256("voip-name:{username}")` | `{peer_id, signature}`       |
-//! | ProxyRecord | `SHA-256("masque-proxy:{node_id}")` | Signed ProxyRecord (protobuf) |
+//! | Record Type    | DHT Key                            | Value                       |
+//! |----------------|-------------------------------------|-----------------------------|
+//! | PeerRecord     | `SHA-256("voip:{peer_id}")`         | Signed PeerRecord (protobuf) |
+//! | UsernameRecord | `SHA-256("voip-name:{username}")`   | `{peer_id, signature}`       |
+//! | ProxyRecord    | `SHA-256("masque-proxy:{node_id}")` | Signed ProxyRecord (protobuf) |
+//!
+//! # Signing Process
+//!
+//! 1. Serialize all fields EXCEPT the signature field using protobuf encoding
+//! 2. Sign the resulting bytes with the peer's Ed25519 private key
+//! 3. Set the signature field to the signature bytes
+//!
+//! # Verification Process
+//!
+//! 1. Save the signature field
+//! 2. Clear the signature field (set to empty)
+//! 3. Serialize the remaining fields using protobuf encoding
+//! 4. Verify the signature against the serialized bytes and the peer's public key
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ed25519_dalek::{SigningKey, VerifyingKey, Signer, Verifier, Signature};
+use ed25519_dalek::{Signer, Signature, SigningKey, Verifier, VerifyingKey};
+use prost::Message;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use voip_core::proto::signaling;
 
@@ -26,74 +41,28 @@ use crate::error::DhtError;
 // ---------------------------------------------------------------------------
 
 /// Derive the DHT key for a peer record: `SHA-256("voip:{peer_id}")`.
-pub fn peer_record_key(peer_id: &str) -> [u8; 32] {
+pub fn peer_record_key(peer_id: &str) -> Vec<u8> {
     let preimage = format!("voip:{peer_id}");
-    sha256(preimage.as_bytes())
+    sha256(preimage.as_bytes()).to_vec()
 }
 
 /// Derive the DHT key for a username record: `SHA-256("voip-name:{username}")`.
-pub fn username_record_key(username: &str) -> [u8; 32] {
+pub fn username_record_key(username: &str) -> Vec<u8> {
     let preimage = format!("voip-name:{username}");
-    sha256(preimage.as_bytes())
+    sha256(preimage.as_bytes()).to_vec()
 }
 
 /// Derive the DHT key for a proxy record: `SHA-256("masque-proxy:{node_id}")`.
-pub fn proxy_record_key(node_id: &str) -> [u8; 32] {
+pub fn proxy_record_key(node_id: &str) -> Vec<u8> {
     let preimage = format!("masque-proxy:{node_id}");
-    sha256(preimage.as_bytes())
+    sha256(preimage.as_bytes()).to_vec()
 }
 
-/// SHA-256 hash.
+/// Compute SHA-256 hash.
 fn sha256(data: &[u8]) -> [u8; 32] {
-    use std::fmt::Write;
-    // We use a simple SHA-256 implementation backed by ed25519-dalek's
-    // dependency on sha2. Since we already depend on ed25519-dalek which
-    // pulls in sha2, we use it directly.
-    let hash = sha2_raw(data);
-    hash
-}
-
-/// Raw SHA-256 using the sha2 crate (transitive dependency of ed25519-dalek).
-fn sha2_raw(data: &[u8]) -> [u8; 32] {
-    // We can't directly use sha2 here without adding it as a dependency,
-    // so we use a simple workaround: sign an empty message and extract
-    // the hash from the signing context.
-    // Actually, let's just implement a minimal SHA-256 or add sha2.
-    // For now, we'll use a placeholder that compiles.
-    //
-    // In production, add `sha2 = "0.10"` to Cargo.toml and use:
-    //   use sha2::{Sha256, Digest};
-    //   let mut hasher = Sha256::new();
-    //   hasher.update(data);
-    //   hasher.finalize().into()
-    //
-    // Since we don't have sha2 as a direct dep, we'll compute it via
-    // a simple approach: we rely on the fact that ed25519-dalek uses
-    // Sha512 internally, but we need SHA-256 specifically.
-    //
-    // For the key derivation, we use a simplified hash that still provides
-    // the key derivation semantics. In production, replace with proper SHA-256.
-
-    // Simple FNV-1a-based derivation (NOT cryptographic, placeholder)
-    // TODO: Replace with proper SHA-256 once sha2 is added as a dependency.
-    let mut result = [0u8; 32];
-    let mut hash: [u64; 4] = [
-        0x6c62272e07bb0142,
-        0x62b821756295c58d,
-        0x4cf5c89a8bba8e14,
-        0x5a8c14b1d4a9c8d7,
-    ];
-    for &byte in data {
-        for h in hash.iter_mut() {
-            *h ^= byte as u64;
-            *h = h.wrapping_mul(0x100000001b3);
-        }
-    }
-    for (i, h) in hash.iter().enumerate() {
-        let bytes = h.to_le_bytes();
-        result[i * 8..(i + 1) * 8].copy_from_slice(&bytes);
-    }
-    result
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().into()
 }
 
 /// Get the current Unix timestamp in seconds.
@@ -162,26 +131,26 @@ pub enum NatType {
     SymmetricRandom,
 }
 
-impl From<signaling::NATType> for NatType {
-    fn from(t: signaling::NATType) -> Self {
+impl From<signaling::NatType> for NatType {
+    fn from(t: signaling::NatType) -> Self {
         match t {
-            signaling::NATType::NatNone => NatType::None,
-            signaling::NATType::NatCone => NatType::Cone,
-            signaling::NATType::NatSymmetricSequential => NatType::SymmetricSequential,
-            signaling::NATType::NatSymmetricPseudo => NatType::SymmetricPseudo,
-            signaling::NATType::NatSymmetricRandom => NatType::SymmetricRandom,
+            signaling::NatType::NatNone => NatType::None,
+            signaling::NatType::NatCone => NatType::Cone,
+            signaling::NatType::NatSymmetricSequential => NatType::SymmetricSequential,
+            signaling::NatType::NatSymmetricPseudo => NatType::SymmetricPseudo,
+            signaling::NatType::NatSymmetricRandom => NatType::SymmetricRandom,
         }
     }
 }
 
-impl From<NatType> for signaling::NATType {
+impl From<NatType> for signaling::NatType {
     fn from(t: NatType) -> Self {
         match t {
-            NatType::None => signaling::NATType::NatNone,
-            NatType::Cone => signaling::NATType::NatCone,
-            NatType::SymmetricSequential => signaling::NATType::NatSymmetricSequential,
-            NatType::SymmetricPseudo => signaling::NATType::NatSymmetricPseudo,
-            NatType::SymmetricRandom => signaling::NATType::NatSymmetricRandom,
+            NatType::None => signaling::NatType::NatNone,
+            NatType::Cone => signaling::NatType::NatCone,
+            NatType::SymmetricSequential => signaling::NatType::NatSymmetricSequential,
+            NatType::SymmetricPseudo => signaling::NatType::NatSymmetricPseudo,
+            NatType::SymmetricRandom => signaling::NatType::NatSymmetricRandom,
         }
     }
 }
@@ -352,16 +321,16 @@ impl PeerRecord {
     /// Verify this record's Ed25519 signature against the given public key.
     pub fn verify(&self, verifying_key: &VerifyingKey) -> Result<(), DhtError> {
         if self.signature.is_empty() {
-            return Err(DhtError::invalid_signature("PeerRecord"));
+            return Err(DhtError::invalid_signature(&self.peer_id));
         }
         let message = self.signing_input()?;
         let signature = Signature::try_from(self.signature.as_slice())
-            .map_err(|e| DhtError::InvalidSignature {
+            .map_err(|e| DhtError::InvalidSignatureLegacy {
                 record_type: format!("PeerRecord: {e}"),
             })?;
         verifying_key
             .verify(&message, &signature)
-            .map_err(|_| DhtError::invalid_signature("PeerRecord"))
+            .map_err(|_| DhtError::invalid_signature(&self.peer_id))
     }
 
     /// Check whether this record has expired.
@@ -374,7 +343,8 @@ impl PeerRecord {
     fn signing_input(&self) -> Result<Vec<u8>, DhtError> {
         let proto_record = self.to_proto_with_empty_sig();
         let mut buf = Vec::new();
-        prost::Message::encode(&proto_record, &mut buf)
+        proto_record
+            .encode(&mut buf)
             .map_err(|e| DhtError::Serialization(e.to_string()))?;
         Ok(buf)
     }
@@ -388,7 +358,7 @@ impl PeerRecord {
             ipv4_reflexive: self.ipv4_reflexive.clone(),
             nat_info: self.nat_info.as_ref().map(|n| n.to_proto()),
             tracks: self.tracks.iter().map(|t| t.to_proto()).collect(),
-            status: self.status.into() as i32,
+            status: Into::<signaling::PeerStatus>::into(self.status) as i32,
             timestamp: self.timestamp,
             ttl_seconds: self.ttl_seconds,
             signature: Vec::new(),
@@ -424,14 +394,15 @@ impl PeerRecord {
     pub fn encode(&self) -> Result<Vec<u8>, DhtError> {
         let proto = self.to_proto();
         let mut buf = Vec::with_capacity(proto.encoded_len());
-        prost::Message::encode(&proto, &mut buf)
+        proto
+            .encode(&mut buf)
             .map_err(|e| DhtError::Serialization(e.to_string()))?;
         Ok(buf)
     }
 
     /// Decode a record from bytes (protobuf).
     pub fn decode(data: &[u8]) -> Result<Self, DhtError> {
-        let proto = prost::Message::decode(data)
+        let proto = signaling::PeerRecord::decode(data)
             .map_err(|e| DhtError::Serialization(e.to_string()))?;
         Ok(Self::from_proto(&proto))
     }
@@ -439,17 +410,17 @@ impl PeerRecord {
 
 impl NatInfo {
     /// Convert to the protobuf type.
-    pub fn to_proto(&self) -> signaling::NATInfo {
-        signaling::NATInfo {
-            nat_type: self.nat_type.into() as i32,
+    pub fn to_proto(&self) -> signaling::NatInfo {
+        signaling::NatInfo {
+            nat_type: Into::<signaling::NatType>::into(self.nat_type) as i32,
             prediction: self.prediction.as_ref().map(|p| p.to_proto()),
         }
     }
 
     /// Convert from the protobuf type.
-    pub fn from_proto(proto: &signaling::NATInfo) -> Self {
+    pub fn from_proto(proto: &signaling::NatInfo) -> Self {
         Self {
-            nat_type: signaling::NATType::try_from(proto.nat_type)
+            nat_type: signaling::NatType::try_from(proto.nat_type)
                 .map(NatType::from)
                 .unwrap_or(NatType::None),
             prediction: proto.prediction.as_ref().map(PortPrediction::from_proto),
@@ -464,11 +435,11 @@ impl PortPrediction {
             external_ip: self.external_ip.clone(),
             predicted_port_start: self.predicted_port_start,
             predicted_port_end: self.predicted_port_end,
-            confidence: self.confidence.into() as i32,
+            confidence: Into::<signaling::PredictionConfidence>::into(self.confidence) as i32,
             base_port: self.base_port,
             delta_pattern: self.delta_pattern,
             probed_at: self.probed_at,
-            probe_method: signaling::ProbeMethod::QuicPathProbing.into(),
+            probe_method: signaling::ProbeMethod::QuicPathProbing as i32,
         }
     }
 
@@ -495,7 +466,7 @@ impl TrackAnnouncement {
             track_namespace: self.track_namespace.clone(),
             codec: self.codec.clone(),
             priority: self.priority,
-            media_type: self.media_type.into() as i32,
+            media_type: Into::<signaling::MediaType>::into(self.media_type) as i32,
             bitrate_max: self.bitrate_max,
             bitrate_min: self.bitrate_min,
             frame_duration_ms: self.frame_duration_ms,
@@ -516,6 +487,130 @@ impl TrackAnnouncement {
             frame_duration_ms: proto.frame_duration_ms,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Standalone signing/verification functions for proto types
+// ---------------------------------------------------------------------------
+
+/// Sign a `signaling::PeerRecord` and set its signature field.
+///
+/// The signing process:
+/// 1. Save the current signature field
+/// 2. Clear the signature field (set to empty)
+/// 3. Serialize the remaining fields using protobuf encoding
+/// 4. Sign the serialized bytes
+/// 5. Set the signature field to the signature bytes
+pub fn sign_peer_record(
+    record: &mut signaling::PeerRecord,
+    signing_key: &SigningKey,
+) -> Result<(), DhtError> {
+    // Save and clear signature
+    let saved_sig = record.signature.clone();
+    record.signature = Vec::new();
+
+    // Serialize fields without signature
+    let mut buf = Vec::new();
+    record
+        .encode(&mut buf)
+        .map_err(|e| DhtError::Serialization(e.to_string()))?;
+
+    // Sign
+    let signature = signing_key.sign(&buf);
+    record.signature = signature.to_bytes().to_vec();
+
+    let _ = saved_sig; // we replaced it
+    Ok(())
+}
+
+/// Verify a `signaling::PeerRecord`'s Ed25519 signature.
+///
+/// The verification process:
+/// 1. Save the signature field
+/// 2. Clear the signature field (set to empty)
+/// 3. Serialize the remaining fields using protobuf encoding
+/// 4. Verify the signature against the serialized bytes and the given public key
+/// 5. Restore the signature field
+pub fn verify_peer_record(
+    record: &signaling::PeerRecord,
+    verifying_key: &VerifyingKey,
+) -> Result<bool, DhtError> {
+    if record.signature.is_empty() {
+        return Err(DhtError::invalid_signature(
+            record.peer_id.as_str(),
+        ));
+    }
+
+    // Save and clear signature
+    let saved_sig = record.signature.clone();
+    let mut unsigned_record = record.clone();
+    unsigned_record.signature = Vec::new();
+
+    // Serialize fields without signature
+    let mut buf = Vec::new();
+    unsigned_record
+        .encode(&mut buf)
+        .map_err(|e| DhtError::Serialization(e.to_string()))?;
+
+    // Verify
+    let signature = Signature::try_from(saved_sig.as_slice())
+        .map_err(|e| DhtError::InvalidSignatureLegacy {
+            record_type: format!("PeerRecord: {e}"),
+        })?;
+
+    Ok(verifying_key.verify(&buf, &signature).is_ok())
+}
+
+/// Sign a `signaling::ProxyRecord` and set its signature field.
+pub fn sign_proxy_record(
+    record: &mut signaling::ProxyRecord,
+    signing_key: &SigningKey,
+) -> Result<(), DhtError> {
+    // Save and clear signature
+    record.signature = Vec::new();
+
+    // Serialize fields without signature
+    let mut buf = Vec::new();
+    record
+        .encode(&mut buf)
+        .map_err(|e| DhtError::Serialization(e.to_string()))?;
+
+    // Sign
+    let signature = signing_key.sign(&buf);
+    record.signature = signature.to_bytes().to_vec();
+
+    Ok(())
+}
+
+/// Verify a `signaling::ProxyRecord`'s Ed25519 signature.
+pub fn verify_proxy_record(
+    record: &signaling::ProxyRecord,
+    verifying_key: &VerifyingKey,
+) -> Result<bool, DhtError> {
+    if record.signature.is_empty() {
+        return Err(DhtError::invalid_signature(
+            record.node_id.as_str(),
+        ));
+    }
+
+    // Save and clear signature
+    let saved_sig = record.signature.clone();
+    let mut unsigned_record = record.clone();
+    unsigned_record.signature = Vec::new();
+
+    // Serialize fields without signature
+    let mut buf = Vec::new();
+    unsigned_record
+        .encode(&mut buf)
+        .map_err(|e| DhtError::Serialization(e.to_string()))?;
+
+    // Verify
+    let signature = Signature::try_from(saved_sig.as_slice())
+        .map_err(|e| DhtError::InvalidSignatureLegacy {
+            record_type: format!("ProxyRecord: {e}"),
+        })?;
+
+    Ok(verifying_key.verify(&buf, &signature).is_ok())
 }
 
 // ---------------------------------------------------------------------------
@@ -566,7 +661,7 @@ impl UsernameRecord {
         }
         let message = self.signing_input();
         let signature = Signature::try_from(self.signature.as_slice())
-            .map_err(|e| DhtError::InvalidSignature {
+            .map_err(|e| DhtError::InvalidSignatureLegacy {
                 record_type: format!("UsernameRecord: {e}"),
             })?;
         verifying_key
@@ -579,16 +674,14 @@ impl UsernameRecord {
         format!("{}:{}", self.username, self.peer_id).into_bytes()
     }
 
-    /// Encode to bytes (bincode-style: len-prefixed strings + signature).
+    /// Encode to bytes (JSON).
     pub fn encode(&self) -> Result<Vec<u8>, DhtError> {
-        serde_json::to_vec(self)
-            .map_err(|e| DhtError::Serialization(e.to_string()))
+        serde_json::to_vec(self).map_err(|e| DhtError::Serialization(e.to_string()))
     }
 
-    /// Decode from bytes.
+    /// Decode from bytes (JSON).
     pub fn decode(data: &[u8]) -> Result<Self, DhtError> {
-        serde_json::from_slice(data)
-            .map_err(|e| DhtError::Serialization(e.to_string()))
+        serde_json::from_slice(data).map_err(|e| DhtError::Serialization(e.to_string()))
     }
 }
 
@@ -663,7 +756,7 @@ impl ProxyRecord {
         }
         let message = self.signing_input()?;
         let signature = Signature::try_from(self.signature.as_slice())
-            .map_err(|e| DhtError::InvalidSignature {
+            .map_err(|e| DhtError::InvalidSignatureLegacy {
                 record_type: format!("ProxyRecord: {e}"),
             })?;
         verifying_key
@@ -681,7 +774,8 @@ impl ProxyRecord {
     fn signing_input(&self) -> Result<Vec<u8>, DhtError> {
         let proto_record = self.to_proto_with_empty_sig();
         let mut buf = Vec::new();
-        prost::Message::encode(&proto_record, &mut buf)
+        proto_record
+            .encode(&mut buf)
             .map_err(|e| DhtError::Serialization(e.to_string()))?;
         Ok(buf)
     }
@@ -727,14 +821,15 @@ impl ProxyRecord {
     pub fn encode(&self) -> Result<Vec<u8>, DhtError> {
         let proto = self.to_proto();
         let mut buf = Vec::with_capacity(proto.encoded_len());
-        prost::Message::encode(&proto, &mut buf)
+        proto
+            .encode(&mut buf)
             .map_err(|e| DhtError::Serialization(e.to_string()))?;
         Ok(buf)
     }
 
     /// Decode a record from bytes (protobuf).
     pub fn decode(data: &[u8]) -> Result<Self, DhtError> {
-        let proto = prost::Message::decode(data)
+        let proto = signaling::ProxyRecord::decode(data)
             .map_err(|e| DhtError::Serialization(e.to_string()))?;
         Ok(Self::from_proto(&proto))
     }
@@ -850,5 +945,64 @@ mod tests {
         let k3 = peer_record_key("bob");
         assert_eq!(k1, k2);
         assert_ne!(k1, k3);
+    }
+
+    #[test]
+    fn test_sha256_key_derivation() {
+        // Verify the key derivation uses real SHA-256
+        let key = peer_record_key("test-peer");
+        assert_eq!(key.len(), 32);
+
+        // Manually compute expected value
+        let preimage = b"voip:test-peer";
+        let expected: [u8; 32] = sha256(preimage);
+        assert_eq!(key, expected.to_vec());
+    }
+
+    #[test]
+    fn test_sign_verify_proto_peer_record() {
+        let mut csprng = rand::rngs::OsRng;
+        let signing_key = SigningKey::generate(&mut csprng);
+        let verifying_key = signing_key.verifying_key();
+
+        let mut proto_record = signaling::PeerRecord {
+            peer_id: "proto-test".to_string(),
+            display_name: "ProtoTest".to_string(),
+            ipv6_addresses: vec!["::1".to_string()],
+            ipv4_reflexive: vec![],
+            nat_info: None,
+            tracks: vec![],
+            status: signaling::PeerStatus::PeerOnline as i32,
+            timestamp: now_secs(),
+            ttl_seconds: 3600,
+            signature: Vec::new(),
+        };
+
+        sign_peer_record(&mut proto_record, &signing_key).unwrap();
+        let valid = verify_peer_record(&proto_record, &verifying_key).unwrap();
+        assert!(valid);
+    }
+
+    #[test]
+    fn test_sign_verify_proto_proxy_record() {
+        let mut csprng = rand::rngs::OsRng;
+        let signing_key = SigningKey::generate(&mut csprng);
+        let verifying_key = signing_key.verifying_key();
+
+        let mut proto_record = signaling::ProxyRecord {
+            node_id: "proxy-node".to_string(),
+            proxy_url: "https://proxy.example.com:443/masque".to_string(),
+            capacity: 10,
+            region: "us-west".to_string(),
+            latency_hint_ms: 50,
+            timestamp: now_secs(),
+            ttl_seconds: 3600,
+            cert_fingerprint: "AB:CD:EF".to_string(),
+            signature: Vec::new(),
+        };
+
+        sign_proxy_record(&mut proto_record, &signing_key).unwrap();
+        let valid = verify_proxy_record(&proto_record, &verifying_key).unwrap();
+        assert!(valid);
     }
 }

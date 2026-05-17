@@ -17,14 +17,14 @@
 //!
 //! - `discover_peer(peer_id)`: Lookup a peer's connection data via DHT
 //!   and/or signaling server. Falls back according to the configured mode.
+//! - `discover_peer_by_username(username)`: Two-step DHT lookup — username → peer_id,
+//!   then peer_id → full PeerRecord.
 //! - `discover_proxy()`: Find available MASQUE proxy nodes. Queries DHT
 //!   for proxy records, optionally falls back to signaling server.
-//! - `resolve_username(username)`: Two-step DHT lookup — username → peer_id,
-//!   then peer_id → full PeerRecord.
+//! - `get_bootstrap_nodes()`: Get DHT bootstrap nodes from the signaling server.
 
 use std::time::Duration;
 
-use ed25519_dalek::VerifyingKey;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
@@ -114,10 +114,24 @@ impl SignalingClient {
         warn!("Signaling server proxy lookup not yet implemented");
         Err(DhtError::not_found("signaling:proxies"))
     }
+
+    /// Get DHT bootstrap nodes from the signaling server.
+    ///
+    /// Corresponds to `GET /v1/dht/bootstrap`.
+    pub async fn get_bootstrap_nodes(&self) -> Result<Vec<String>, DhtError> {
+        // TODO: Implement actual HTTP request.
+        warn!("Signaling server bootstrap node lookup not yet implemented");
+        Err(DhtError::not_found("signaling:bootstrap"))
+    }
+
+    /// Get the server URL.
+    pub fn server_url(&self) -> &str {
+        &self.server_url
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Discovery
+// DiscoveryService
 // ---------------------------------------------------------------------------
 
 /// The discovery layer that coordinates DHT and signaling lookups.
@@ -126,99 +140,89 @@ impl SignalingClient {
 /// - Peer discovery by ID or username
 /// - MASQUE proxy discovery
 /// - Configurable privacy-first / speed-first mode
-pub struct Discovery {
+/// - Record refresh for keeping DHT records alive
+///
+/// # ROADMAP Steps Implemented
+///
+/// - Step 1.6: DHT fallback → signaling server (DISC-03)
+/// - Step 1.7: Username → Peer ID resolution: two-step DHT lookup
+/// - Step 1.8: DHT record refresh: re-publish before TTL expiry (every 30 min)
+/// - Step 1.9: Mobile DHT constraint: lookup-only API, no full routing node
+pub struct DiscoveryService {
     /// The DHT node for distributed lookups.
-    dht: DhtNode,
-    /// The signaling server client for fallback lookups.
+    dht_node: DhtNode,
+    /// The signaling server URL.
+    #[allow(dead_code)]
+    signaling_url: String,
+    /// The signaling server client.
     signaling: SignalingClient,
     /// The discovery priority mode.
-    mode: DiscoveryMode,
+    privacy_first: bool,
     /// Timeout for DHT lookups before falling back.
-    dht_timeout: Duration,
-    /// Timeout for signaling server lookups before falling back.
-    signaling_timeout: Duration,
+    dht_timeout_ms: u64,
 }
 
-impl Discovery {
-    /// Create a new discovery layer with the given DHT node, signaling client, and mode.
-    pub fn new(
-        dht: DhtNode,
-        signaling: SignalingClient,
-        mode: DiscoveryMode,
-    ) -> Self {
+impl DiscoveryService {
+    /// Create a new discovery service with the given DHT node, signaling URL, and config.
+    ///
+    /// The config determines:
+    /// - `discovery_privacy_first`: Whether to try DHT first (true) or signaling first (false)
+    /// - `dht_lookup_timeout_ms`: How long to wait for DHT before falling back
+    pub fn new(dht_node: DhtNode, signaling_url: String, config: &VoIPConfig) -> Self {
+        let signaling = SignalingClient::new(signaling_url.clone());
         Self {
-            dht,
+            dht_node,
+            signaling_url,
             signaling,
-            mode,
-            dht_timeout: Duration::from_millis(200),
-            signaling_timeout: Duration::from_millis(50),
+            privacy_first: config.discovery_privacy_first,
+            dht_timeout_ms: config.dht_lookup_timeout_ms,
         }
-    }
-
-    /// Create a discovery layer from a VoIPConfig.
-    pub async fn from_config(config: &VoIPConfig) -> Result<Self, DhtError> {
-        let dht = DhtNode::from_config(config).await?;
-        let signaling = SignalingClient::new(
-            config
-                .signaling_server_ips
-                .first()
-                .cloned()
-                .unwrap_or_default(),
-        );
-        let mode = DiscoveryMode::from(config.discovery_privacy_first);
-
-        let mut disc = Self::new(dht, signaling, mode);
-        disc.dht_timeout = Duration::from_millis(config.dht_lookup_timeout_ms);
-        disc
     }
 
     /// Get the current discovery mode.
     pub fn mode(&self) -> DiscoveryMode {
-        self.mode
+        DiscoveryMode::from(self.privacy_first)
     }
 
     /// Set the discovery mode.
-    pub fn set_mode(&mut self, mode: DiscoveryMode) {
-        self.mode = mode;
+    pub fn set_mode(&mut self, privacy_first: bool) {
+        self.privacy_first = privacy_first;
     }
 
     // -----------------------------------------------------------------------
-    // Peer discovery
+    // Peer discovery (Step 1.6: DHT fallback)
     // -----------------------------------------------------------------------
 
     /// Discover a peer by their peer ID.
     ///
     /// Looks up the peer's `PeerRecord` using the configured discovery mode:
-    /// - **Privacy-first**: Try DHT first, fall back to signaling.
+    /// - **Privacy-first (default)**: Try DHT first, fall back to signaling.
     /// - **Speed-first**: Try signaling first, fall back to DHT.
-    pub async fn discover_peer(&self, peer_id: &str) -> Result<PeerRecord, DhtError> {
-        match self.mode {
-            DiscoveryMode::PrivacyFirst => {
-                // Try DHT first.
-                info!(peer_id, mode = "privacy-first", "Discovering peer");
-                match self.discover_peer_dht(peer_id).await {
-                    Ok(record) => {
-                        debug!(peer_id, "Peer found via DHT");
-                        Ok(record)
-                    }
-                    Err(dht_err) => {
-                        warn!(peer_id, error = %dht_err, "DHT lookup failed, falling back to signaling");
-                        self.discover_peer_signaling(peer_id).await
-                    }
+    pub async fn discover_peer(&mut self, peer_id: &str) -> Result<PeerRecord, DhtError> {
+        if self.privacy_first {
+            // Try DHT first.
+            info!(peer_id, mode = "privacy-first", "Discovering peer");
+            match self.discover_peer_dht(peer_id).await {
+                Ok(record) => {
+                    debug!(peer_id, "Peer found via DHT");
+                    Ok(record)
+                }
+                Err(dht_err) => {
+                    warn!(peer_id, error = %dht_err, "DHT lookup failed, falling back to signaling");
+                    self.discover_peer_signaling(peer_id).await
                 }
             }
-            DiscoveryMode::SpeedFirst => {
-                // Try signaling first.
-                info!(peer_id, mode = "speed-first", "Discovering peer");
-                match self.discover_peer_signaling(peer_id).await {
-                    Ok(record) => {
-                        debug!(peer_id, "Peer found via signaling");
-                        Ok(record)
-                    }
-                    Err(sig_err) => {
-                        warn!(peer_id, error = %sig_err, "Signaling lookup failed, falling back to DHT");
-                        self.discover_peer_dht(peer_id).await
-                    }
+        } else {
+            // Try signaling first.
+            info!(peer_id, mode = "speed-first", "Discovering peer");
+            match self.discover_peer_signaling(peer_id).await {
+                Ok(record) => {
+                    debug!(peer_id, "Peer found via signaling");
+                    Ok(record)
+                }
+                Err(sig_err) => {
+                    warn!(peer_id, error = %sig_err, "Signaling lookup failed, falling back to DHT");
+                    self.discover_peer_dht(peer_id).await
                 }
             }
         }
@@ -226,68 +230,74 @@ impl Discovery {
 
     /// Discover a peer via the DHT only.
     async fn discover_peer_dht(&self, peer_id: &str) -> Result<PeerRecord, DhtError> {
-        let result = timeout(self.dht_timeout, self.dht.get_peer_record(peer_id)).await;
+        let dht_timeout = Duration::from_millis(self.dht_timeout_ms);
+        let result = timeout(dht_timeout, self.dht_node.get_peer_record(peer_id)).await;
 
         match result {
             Ok(Ok(data)) => {
                 let record = PeerRecord::decode(&data)?;
                 if record.is_expired() {
-                    return Err(DhtError::Expired {
-                        published_at: record.timestamp,
-                        ttl_secs: record.ttl_seconds,
+                    return Err(DhtError::RecordExpired {
+                        key: peer_id.to_string(),
+                        expired_at: record.timestamp + record.ttl_seconds as u64,
                     });
                 }
                 Ok(record)
             }
             Ok(Err(e)) => Err(e),
-            Err(_) => Err(DhtError::timeout(self.dht_timeout.as_millis() as u64)),
+            Err(_) => Err(DhtError::LookupTimeout {
+                key: peer_id.to_string(),
+                elapsed_ms: self.dht_timeout_ms,
+            }),
         }
     }
 
     /// Discover a peer via the signaling server only.
     async fn discover_peer_signaling(&self, peer_id: &str) -> Result<PeerRecord, DhtError> {
-        let result = timeout(self.signaling_timeout, self.signaling.lookup_peer(peer_id)).await;
+        let signaling_timeout = Duration::from_millis(50);
+        let result = timeout(signaling_timeout, self.signaling.lookup_peer(peer_id)).await;
 
         match result {
             Ok(Ok(record)) => Ok(record),
             Ok(Err(e)) => Err(e),
-            Err(_) => Err(DhtError::timeout(self.signaling_timeout.as_millis() as u64)),
+            Err(_) => Err(DhtError::LookupTimeout {
+                key: peer_id.to_string(),
+                elapsed_ms: 50,
+            }),
         }
     }
 
     // -----------------------------------------------------------------------
-    // Username resolution
+    // Username resolution (Step 1.7: Two-step DHT lookup)
     // -----------------------------------------------------------------------
 
-    /// Resolve a username to a full PeerRecord.
+    /// Discover a peer by username (two-step DHT lookup).
     ///
-    /// This is a two-step process in the DHT:
-    /// 1. Look up `SHA-256("voip-name:{username}")` → `UsernameRecord` (peer_id)
+    /// Per spec §6.2.5:
+    /// 1. Look up `SHA-256("voip-name:{username}")` → `UsernameRecord` (contains peer_id)
     /// 2. Look up `SHA-256("voip:{peer_id}")` → `PeerRecord`
     ///
     /// Total: ~160ms (often cached after the first lookup).
     /// The username record is published alongside the peer record and
     /// refreshed every 30 minutes (per spec §6.2.5).
-    pub async fn resolve_username(&self, username: &str) -> Result<PeerRecord, DhtError> {
-        match self.mode {
-            DiscoveryMode::PrivacyFirst => {
-                // Try DHT first.
-                match self.resolve_username_dht(username).await {
-                    Ok(record) => Ok(record),
-                    Err(_) => {
-                        // Fall back to signaling.
-                        self.resolve_username_signaling(username).await
-                    }
+    pub async fn discover_peer_by_username(
+        &mut self,
+        username: &str,
+    ) -> Result<PeerRecord, DhtError> {
+        if self.privacy_first {
+            match self.resolve_username_dht(username).await {
+                Ok(record) => Ok(record),
+                Err(_) => {
+                    warn!("DHT username resolution failed, falling back to signaling");
+                    self.resolve_username_signaling(username).await
                 }
             }
-            DiscoveryMode::SpeedFirst => {
-                // Try signaling first.
-                match self.resolve_username_signaling(username).await {
-                    Ok(record) => Ok(record),
-                    Err(_) => {
-                        // Fall back to DHT.
-                        self.resolve_username_dht(username).await
-                    }
+        } else {
+            match self.resolve_username_signaling(username).await {
+                Ok(record) => Ok(record),
+                Err(_) => {
+                    warn!("Signaling username resolution failed, falling back to DHT");
+                    self.resolve_username_dht(username).await
                 }
             }
         }
@@ -295,14 +305,19 @@ impl Discovery {
 
     /// Resolve a username via the DHT (two-step lookup).
     async fn resolve_username_dht(&self, username: &str) -> Result<PeerRecord, DhtError> {
+        let dht_timeout = Duration::from_millis(self.dht_timeout_ms);
+
         // Step 1: username → peer_id
         info!(username, "Resolving username via DHT (step 1: username → peer_id)");
         let username_data = timeout(
-            self.dht_timeout,
-            self.dht.get_username_record(username),
+            dht_timeout,
+            self.dht_node.get_username_record(username),
         )
         .await
-        .map_err(|_| DhtError::timeout(self.dht_timeout.as_millis() as u64()))??;
+        .map_err(|_| DhtError::LookupTimeout {
+            key: format!("voip-name:{username}"),
+            elapsed_ms: self.dht_timeout_ms,
+        })??;
 
         let username_record = UsernameRecord::decode(&username_data)?;
 
@@ -317,21 +332,25 @@ impl Discovery {
 
     /// Resolve a username via the signaling server.
     async fn resolve_username_signaling(&self, username: &str) -> Result<PeerRecord, DhtError> {
-        // The signaling server provides a single-step lookup.
         info!(username, "Resolving username via signaling server");
+        let signaling_timeout = Duration::from_millis(50);
+
         let peer_id = timeout(
-            self.signaling_timeout,
+            signaling_timeout,
             self.signaling.lookup_username(username),
         )
         .await
-        .map_err(|_| DhtError::timeout(self.signaling_timeout.as_millis() as u64()))??;
+        .map_err(|_| DhtError::LookupTimeout {
+            key: format!("signaling:username:{username}"),
+            elapsed_ms: 50,
+        })??;
 
         // Then get the full peer record.
         self.discover_peer_signaling(&peer_id).await
     }
 
     // -----------------------------------------------------------------------
-    // Proxy discovery
+    // Proxy discovery (Step 1.6: DHT fallback for proxy records)
     // -----------------------------------------------------------------------
 
     /// Discover available MASQUE proxy nodes.
@@ -344,23 +363,20 @@ impl Discovery {
     ///
     /// Falls back to signaling server (`GET /v1/proxies`) if DHT fails.
     pub async fn discover_proxy(&self) -> Result<Vec<ProxyRecord>, DhtError> {
-        match self.mode {
-            DiscoveryMode::PrivacyFirst => {
-                match self.discover_proxy_dht().await {
-                    Ok(proxies) if !proxies.is_empty() => Ok(proxies),
-                    _ => {
-                        warn!("DHT proxy discovery failed, falling back to signaling");
-                        self.discover_proxy_signaling().await
-                    }
+        if self.privacy_first {
+            match self.discover_proxy_dht().await {
+                Ok(proxies) if !proxies.is_empty() => Ok(proxies),
+                _ => {
+                    warn!("DHT proxy discovery failed, falling back to signaling");
+                    self.discover_proxy_signaling().await
                 }
             }
-            DiscoveryMode::SpeedFirst => {
-                match self.discover_proxy_signaling().await {
-                    Ok(proxies) if !proxies.is_empty() => Ok(proxies),
-                    _ => {
-                        warn!("Signaling proxy discovery failed, falling back to DHT");
-                        self.discover_proxy_dht().await
-                    }
+        } else {
+            match self.discover_proxy_signaling().await {
+                Ok(proxies) if !proxies.is_empty() => Ok(proxies),
+                _ => {
+                    warn!("Signaling proxy discovery failed, falling back to DHT");
+                    self.discover_proxy_dht().await
                 }
             }
         }
@@ -402,11 +418,6 @@ impl Discovery {
         candidates: &'a [ProxyRecord],
         max_region_distance: Option<&str>,
     ) -> Option<&'a ProxyRecord> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
         candidates
             .iter()
             .filter(|p| !p.is_expired())
@@ -431,16 +442,16 @@ impl Discovery {
         record: &PeerRecord,
     ) -> Result<(), DhtError> {
         let data = record.encode()?;
-        self.dht.put_peer_record(&record.peer_id, &data).await?;
+        self.dht_node.put_peer_record(&record.peer_id, &data).await?;
 
         // Also publish the username mapping if display_name is set.
         if !record.display_name.is_empty() {
-            let mut username_record =
+            let username_record =
                 UsernameRecord::new_unsigned(record.display_name.clone(), record.peer_id.clone());
             // Note: In production, the username record must be signed by the
             // same key as the peer record. The signing key would be passed in.
             let username_data = username_record.encode()?;
-            self.dht
+            self.dht_node
                 .put_username_record(&record.display_name, &username_data)
                 .await?;
         }
@@ -455,13 +466,57 @@ impl Discovery {
         record: &ProxyRecord,
     ) -> Result<(), DhtError> {
         let data = record.encode()?;
-        self.dht.put_proxy_record(&record.node_id, &data).await?;
+        self.dht_node.put_proxy_record(&record.node_id, &data).await?;
         info!(node_id = record.node_id, "Published proxy record to DHT");
         Ok(())
     }
 
+    // -----------------------------------------------------------------------
+    // Record refresh (Step 1.8: Re-publish before TTL expiry)
+    // -----------------------------------------------------------------------
+
+    /// Start a background task that re-publishes records at the given interval.
+    ///
+    /// Per spec §6.2.2 and ROADMAP Step 1.8, DHT records have a 1-hour TTL
+    /// and should be re-published every 30 minutes (before the TTL expires).
+    ///
+    /// # Arguments
+    ///
+    /// * `records` - List of (key, value) pairs to re-publish.
+    /// * `interval_secs` - How often to re-publish (default: 1800 = 30 minutes).
+    pub fn start_record_refresh(
+        &mut self,
+        records: Vec<(Vec<u8>, Vec<u8>)>,
+        interval_secs: u64,
+    ) {
+        self.dht_node.start_record_refresh(records, interval_secs);
+    }
+
+    /// Stop the record refresh background task.
+    pub fn stop_record_refresh(&mut self) {
+        self.dht_node.stop_record_refresh();
+    }
+
+    // -----------------------------------------------------------------------
+    // Bootstrap node discovery
+    // -----------------------------------------------------------------------
+
+    /// Get DHT bootstrap nodes from the signaling server.
+    ///
+    /// Corresponds to `GET /v1/dht/bootstrap`.
+    ///
+    /// This is used when the hardcoded bootstrap nodes are unreachable
+    /// and the client needs to find active DHT nodes to join the network.
+    pub async fn get_bootstrap_nodes(&self) -> Result<Vec<String>, DhtError> {
+        self.signaling.get_bootstrap_nodes().await
+    }
+
+    // -----------------------------------------------------------------------
+    // Lifecycle
+    // -----------------------------------------------------------------------
+
     /// Shut down the discovery layer and underlying DHT node.
     pub async fn shutdown(&self) -> Result<(), DhtError> {
-        self.dht.shutdown().await
+        self.dht_node.shutdown().await
     }
 }

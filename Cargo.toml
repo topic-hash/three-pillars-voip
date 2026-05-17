@@ -40,7 +40,7 @@ tower-http = { version = "0.6", features = ["cors"] }
 tokio-tungstenite = "0.26"
 
 # DHT
-libp2p = { version = "0.56", features = ["kad", "noise", "tcp", "quic", "websocket", "tls", "dns", "ping", "identify"] }
+libp2p = { version = "0.56", features = ["kad", "noise", "tcp", "quic", "websocket", "tls", "dns", "ping", "identify", "tokio"] }
 
 # Audio
 opus = "0.3"
