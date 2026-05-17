@@ -1,25 +1,16 @@
-//! voip-core: Shared types and Protobuf definitions for Three Pillars VoIP.
+//! Three Pillars VoIP — Core types and definitions
 //!
-//! This crate contains:
-//!   - Protobuf-generated types from `proto/signaling.proto`
-//!   - Rust-native type wrappers with ergonomic APIs
-//!   - Configuration constants (spec/11 §11.3)
-//!   - Call state machine (spec/07 §7.3.1)
-//!   - Error types mapping to spec error codes (spec/08 §8.5)
-//!   - Cryptographic utilities (spec/08 §8.6, §8.7)
+//! This crate contains shared types, Protobuf definitions, state machines,
+//! configuration, error types, and crypto utilities. No I/O, no network,
+//! no filesystem — pure types only.
 
-/// Protobuf-generated signaling messages from `proto/signaling.proto`.
-///
-/// Wire format: 2-byte message type (uint16, big-endian) + prost-encoded payload.
-/// See spec/08_API_Specification.md §8.1.1 for type ID assignments.
-pub mod signaling {
-    include!(concat!(env!("OUT_DIR"), "/voip.signaling.rs"));
-}
-
-/// Re-export of the protobuf types as `proto`, used by other modules
-/// in this crate and by dependent crates for concise type references.
 pub mod proto {
-    pub use crate::signaling::*;
+    pub mod signaling {
+        include!(concat!(env!("OUT_DIR"), "/voip.signaling.rs"));
+    }
+    pub mod internal {
+        include!(concat!(env!("OUT_DIR"), "/voip.internal.rs"));
+    }
 }
 
 pub mod config;
@@ -27,3 +18,10 @@ pub mod crypto;
 pub mod error;
 pub mod state;
 pub mod types;
+
+// Re-exports for convenience
+pub use config::VoIPConfig;
+pub use crypto::{generate_connection_id, generate_ed25519_keypair, peer_id_from_public_key};
+pub use error::VoipError;
+pub use state::CallStateMachine;
+pub use types::*;

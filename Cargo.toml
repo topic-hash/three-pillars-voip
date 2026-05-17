@@ -46,7 +46,10 @@ libp2p = { version = "0.56", features = ["kad", "noise", "tcp", "quic", "websock
 opus = "0.3"
 
 # Push notifications
-# fcmlib is for FCM plotter files, not Firebase — we'll use fcm crate or REST API instead
+# fcmlib is for FCM plotter files, not Firebase — we use fcm crate or REST API instead
+
+# TLS cert provisioning (proxy)
+rustls-acme = "0.12"
 
 # UniFFI
 uniffi = "0.31"

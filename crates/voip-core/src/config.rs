@@ -3,6 +3,9 @@
 //! All configurable parameters for the Three Pillars VoIP system with
 //! sensible defaults as defined in the specification.
 
+/// Opus codec application mode for VoIP.
+pub const OPUS_APPLICATION_VOIP: u32 = 2048;
+
 /// Global configuration for the VoIP system.
 ///
 /// See spec/11 §11.3 for the authoritative definition of all fields
@@ -130,11 +133,7 @@ impl Default for VoIPConfig {
             // === Discovery ===
             discovery_privacy_first: true,
             dht_lookup_timeout_ms: 200,
-            dht_bootstrap_nodes: vec![
-                "/ip4/104.131.131.82/udp/4001/quic-v1/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ".to_string(),
-                "/ip4/104.236.76.40/udp/4001/quic-v1/p2p/QmSoLV4Bbm51jM9C4gDYZQ9Cy3U6aXMJDAbzgu2fzaDs64".to_string(),
-                "/ip4/178.128.155.54/udp/4001/quic-v1/p2p/QmSoLMeWqB7YGVLJN3pNLQpmmEk35v6wYtsMGLzSr5QBU3".to_string(),
-            ],
+            dht_bootstrap_nodes: vec![],
             dht_record_ttl_secs: 3600,
 
             // === Push Retry ===
@@ -164,13 +163,7 @@ impl Default for VoIPConfig {
             rate_limit_registrations_per_min: 6,
             rate_limit_ws_messages_per_sec: 30,
             jwt_expiry_secs: 3600,
-            signaling_server_ips: vec![
-                "203.0.113.1".to_string(),
-                "203.0.113.2".to_string(),
-                "203.0.113.3".to_string(),
-                "203.0.113.4".to_string(),
-                "203.0.113.5".to_string(),
-            ],
+            signaling_server_ips: vec![],
 
             // === Session Tickets ===
             session_ticket_ttl_secs: 86400,
@@ -220,6 +213,57 @@ impl VoIPConfig {
     }
 }
 
+/// Opus codec configuration for VoIP audio.
+///
+/// Default values are optimized for narrowband VoIP at 48 kHz mono.
+#[derive(Debug, Clone)]
+pub struct OpusConfig {
+    /// Sample rate in Hz (default: 48000)
+    pub sample_rate: u32,
+    /// Number of channels (default: 1 = mono)
+    pub channels: u8,
+    /// Opus application mode (default: OPUS_APPLICATION_VOIP = 2048)
+    pub application: u32,
+    /// Maximum bitrate in bps (default: 64000)
+    pub bitrate_max: i32,
+    /// Minimum bitrate in bps (default: 6000)
+    pub bitrate_min: i32,
+    /// Frame duration in milliseconds (default: 20)
+    pub frame_duration_ms: u32,
+    /// Enable forward error correction (default: true)
+    pub fec: bool,
+    /// Enable discontinuous transmission / VAD (default: true)
+    pub dtx: bool,
+    /// Encoder complexity 0-10 (default: 10)
+    pub complexity: u8,
+    /// Frame size in samples at the given sample rate (default: 960 = 48kHz * 20ms)
+    pub frame_size: usize,
+}
+
+impl Default for OpusConfig {
+    fn default() -> Self {
+        Self {
+            sample_rate: 48000,
+            channels: 1,
+            application: OPUS_APPLICATION_VOIP,
+            bitrate_max: 64000,
+            bitrate_min: 6000,
+            frame_duration_ms: 20,
+            fec: true,
+            dtx: true,
+            complexity: 10,
+            frame_size: 960, // 48000 Hz * 0.020 s = 960 samples
+        }
+    }
+}
+
+impl OpusConfig {
+    /// Creates a new OpusConfig with all defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,6 +283,7 @@ mod tests {
         assert_eq!(config.quic_alpn, "moq-00");
         assert!(config.discovery_privacy_first);
         assert_eq!(config.dht_lookup_timeout_ms, 200);
+        assert!(config.dht_bootstrap_nodes.is_empty());
         assert_eq!(config.dht_record_ttl_secs, 3600);
         assert!(config.push_retry_enabled);
         assert_eq!(config.push_retry_initial_delay_secs, 5);
@@ -258,6 +303,7 @@ mod tests {
         assert_eq!(config.rate_limit_registrations_per_min, 6);
         assert_eq!(config.rate_limit_ws_messages_per_sec, 30);
         assert_eq!(config.jwt_expiry_secs, 3600);
+        assert!(config.signaling_server_ips.is_empty());
         assert_eq!(config.session_ticket_ttl_secs, 86400);
         assert_eq!(config.moq_feedback_interval_ms, 1000);
     }
@@ -284,5 +330,34 @@ mod tests {
         let (start, end) = config.pseudo_prediction_range(50000);
         assert_eq!(start, 49992);
         assert_eq!(end, 50008);
+    }
+
+    #[test]
+    fn test_prediction_range_clamped() {
+        let config = VoIPConfig::default();
+        // Sequential: base 1025, margin 3 -> [1024, 1028]
+        let (start, end) = config.sequential_prediction_range(1025);
+        assert_eq!(start, 1024);
+        assert_eq!(end, 1028);
+
+        // Sequential: base 65534, margin 3 -> [65531, 65535]
+        let (start, end) = config.sequential_prediction_range(65534);
+        assert_eq!(start, 65531);
+        assert_eq!(end, 65535);
+    }
+
+    #[test]
+    fn test_default_opus_config() {
+        let config = OpusConfig::default();
+        assert_eq!(config.sample_rate, 48000);
+        assert_eq!(config.channels, 1);
+        assert_eq!(config.application, OPUS_APPLICATION_VOIP);
+        assert_eq!(config.bitrate_max, 64000);
+        assert_eq!(config.bitrate_min, 6000);
+        assert_eq!(config.frame_duration_ms, 20);
+        assert!(config.fec);
+        assert!(config.dtx);
+        assert_eq!(config.complexity, 10);
+        assert_eq!(config.frame_size, 960);
     }
 }

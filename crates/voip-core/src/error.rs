@@ -4,7 +4,7 @@
 //! (Network, Timeout, NAT, MASQUE, etc.) and maps them to `CallEndReason`
 //! from the spec. Error codes follow the spec/08 §8.5 range (1001-9999).
 
-use crate::types::{CallEndReason, CallState, ConnectionMethod};
+use crate::types::CallEndReason;
 
 /// Error codes from spec/08 §8.5.
 ///
@@ -51,197 +51,112 @@ pub mod error_codes {
 #[derive(Debug, thiserror::Error)]
 pub enum VoipError {
     // === Network errors ===
-    /// QUIC handshake failed
-    #[error("QUIC handshake failed: {reason}")]
-    QuicHandshakeFailed {
-        reason: String,
-    },
+    /// QUIC connection failed
+    #[error("QUIC connection failed: {0}")]
+    QuicConnectionFailed(String),
 
-    /// QUIC connection was lost after establishment
-    #[error("QUIC connection lost: {reason}")]
-    ConnectionLost {
-        reason: String,
-    },
+    /// QUIC handshake timeout
+    #[error("QUIC handshake timeout")]
+    QuicHandshakeTimeout,
 
     /// Connection migration failed
-    #[error("Connection migration failed: {reason}")]
-    MigrationFailed {
-        reason: String,
-    },
-
-    /// Network interface changed (WiFi → cellular, etc.)
-    #[error("Network interface changed")]
-    NetworkChanged,
-
-    // === Timeout errors ===
-    /// Call ringing timeout
-    #[error("Call ringing timeout after {timeout_ms}ms")]
-    RingingTimeout {
-        timeout_ms: u64,
-    },
-
-    /// Connection attempt timeout
-    #[error("Connection attempt timeout after {timeout_ms}ms")]
-    ConnectTimeout {
-        timeout_ms: u64,
-    },
-
-    /// QUIC path probe timeout
-    #[error("QUIC path probe timeout to server IP {server_ip}")]
-    PathProbeTimeout {
-        server_ip: String,
-    },
-
-    /// DHT lookup timeout
-    #[error("DHT lookup timeout for peer {peer_id}")]
-    DhtLookupTimeout {
-        peer_id: String,
-    },
+    #[error("Connection migration failed")]
+    MigrationFailed,
 
     // === NAT errors ===
+    /// NAT probing failed
+    #[error("NAT probing failed: {0}")]
+    NatProbeFailed(String),
+
     /// Both peers behind symmetric NAT with random port allocation
-    #[error("Both peers behind IPv4 Symmetric NAT with random allocation — prediction impossible")]
-    Ipv4RandomNat,
+    #[error("Both peers have random NAT — prediction impossible")]
+    NatRandomBothSides,
 
     /// UDP blocked by firewall
     #[error("UDP blocked by firewall")]
     UdpBlocked,
 
     /// Both UDP and TCP port 443 blocked
-    #[error("UDP blocked AND TCP port 443 blocked — no MASQUE possible")]
+    #[error("TCP port 443 also blocked — no MASQUE possible")]
     TcpBlocked,
 
-    /// NAT probe cache expired
-    #[error("NAT probe cache expired (TTL {ttl_secs}s)")]
-    NatCacheExpired {
-        ttl_secs: u64,
-    },
-
-    /// Port prediction miss — predicted range did not match
-    #[error("Port prediction miss: predicted {predicted_start}-{predicted_end}, actual {actual_port}")]
-    PredictionMiss {
-        predicted_start: u32,
-        predicted_end: u32,
-        actual_port: u32,
-    },
-
     // === MASQUE errors ===
+    /// MASQUE proxy unreachable
+    #[error("MASQUE proxy unreachable: {0}")]
+    MasqueProxyUnreachable(String),
+
+    /// MASQUE tunnel setup failed
+    #[error("MASQUE tunnel setup failed: {0}")]
+    MasqueTunnelFailed(String),
+
+    /// MASQUE tunnel disconnected during active call
+    #[error("MASQUE tunnel disconnected during call")]
+    MasqueTunnelDisconnected,
+
     /// No MASQUE proxy available
     #[error("No MASQUE proxy available")]
     MasqueNoProxy,
 
-    /// MASQUE proxy connection timeout
-    #[error("MASQUE proxy connection timeout after {timeout_ms}ms")]
-    MasqueProxyTimeout {
-        timeout_ms: u64,
-    },
-
-    /// MASQUE proxy coordination failed
-    #[error("MASQUE proxy coordination failed: {reason}")]
-    MasqueCoordinationFailed {
-        reason: String,
-    },
-
-    /// All MASQUE transports failed (HTTP/3 and HTTP/2)
-    #[error("All MASQUE transports failed (HTTP/3 and HTTP/2)")]
-    MasqueAllTransportsFailed,
-
-    /// MASQUE tunnel disconnected during active call
-    #[error("MASQUE tunnel disconnected: {reason}")]
-    MasqueTunnelDisconnected {
-        reason: String,
-    },
+    /// ProxyToken validation failed
+    #[error("ProxyToken validation failed")]
+    ProxyTokenInvalid,
 
     // === Signaling errors ===
-    /// Unknown peer
-    #[error("Unknown peer: {peer_id}")]
-    UnknownPeer {
-        peer_id: String,
-    },
+    /// Signaling server error
+    #[error("Signaling server error: {0}")]
+    SignalingError(String),
 
-    /// Peer is offline
-    #[error("Peer is offline: {peer_id}")]
-    PeerOffline {
-        peer_id: String,
-    },
-
-    /// Invalid call ID
-    #[error("Invalid call ID: {call_id}")]
-    InvalidCallId {
-        call_id: String,
-    },
-
-    /// Call already exists
-    #[error("Call already exists: {call_id}")]
-    CallAlreadyExists {
-        call_id: String,
-    },
-
-    /// Not a participant in this call
-    #[error("Not a participant in call {call_id}")]
-    NotCallParticipant {
-        call_id: String,
-    },
+    /// JWT authentication failed
+    #[error("JWT authentication failed: {0}")]
+    JwtAuthFailed(String),
 
     /// Rate limited
     #[error("Rate limited")]
     RateLimited,
 
-    /// Authentication error
-    #[error("Authentication error: {reason}")]
-    Authentication {
-        reason: String,
-    },
+    /// Peer not found
+    #[error("Peer not found: {0}")]
+    PeerNotFound(String),
 
-    /// Invalid message format
-    #[error("Invalid message: {reason}")]
-    InvalidMessage {
-        reason: String,
-    },
+    /// Peer is offline
+    #[error("Peer offline: {0}")]
+    PeerOffline(String),
 
     // === State machine errors ===
     /// Invalid state transition attempted
-    #[error("Invalid state transition from {from:?} to {to:?}: {reason}")]
-    InvalidStateTransition {
-        from: CallState,
-        to: CallState,
-        reason: &'static str,
+    #[error("Invalid state transition: {from:?} → {to:?}: {reason}")]
+    InvalidTransition {
+        from: String,
+        to: String,
+        reason: String,
     },
 
-    /// Push retry attempts exhausted
-    #[error("Push retry exhausted after {attempts} attempts")]
-    RetryExhausted {
-        attempts: u32,
-    },
+    /// Call already exists
+    #[error("Call already exists: {0}")]
+    CallAlreadyExists(String),
 
-    /// Call was rejected by the callee
-    #[error("Call rejected by callee")]
-    Rejected,
+    // === DHT errors ===
+    /// DHT lookup failed
+    #[error("DHT lookup failed: {0}")]
+    DhtLookupFailed(String),
+
+    /// DHT record verification failed
+    #[error("DHT record verification failed")]
+    DhtRecordVerificationFailed,
+
+    // === Crypto errors ===
+    /// Ed25519 signature verification failed
+    #[error("Ed25519 signature verification failed")]
+    SignatureVerificationFailed,
+
+    /// Invalid key material
+    #[error("Invalid key material: {0}")]
+    InvalidKeyMaterial(String),
 
     // === Internal errors ===
     /// Internal server/client error
-    #[error("Internal error: {reason}")]
-    Internal {
-        reason: String,
-    },
-
-    /// Cryptographic operation failed
-    #[error("Crypto error: {reason}")]
-    Crypto {
-        reason: String,
-    },
-
-    /// Serialization/deserialization error
-    #[error("Serialization error: {reason}")]
-    Serialization {
-        reason: String,
-    },
-
-    /// All connection methods failed
-    #[error("All connection methods failed for peer {peer_id}")]
-    AllMethodsFailed {
-        peer_id: String,
-    },
+    #[error("Internal error: {0}")]
+    Internal(String),
 }
 
 impl VoipError {
@@ -249,51 +164,44 @@ impl VoipError {
     pub fn to_call_end_reason(&self) -> CallEndReason {
         match self {
             // Network errors → FailedNetwork or MigrationFailed
-            VoipError::QuicHandshakeFailed { .. } => CallEndReason::FailedNetwork,
-            VoipError::ConnectionLost { .. } => CallEndReason::FailedNetwork,
-            VoipError::MigrationFailed { .. } => CallEndReason::MigrationFailed,
-            VoipError::NetworkChanged => CallEndReason::MigrationFailed,
-
-            // Timeout errors → Timeout
-            VoipError::RingingTimeout { .. } => CallEndReason::Timeout,
-            VoipError::ConnectTimeout { .. } => CallEndReason::Timeout,
-            VoipError::PathProbeTimeout { .. } => CallEndReason::Timeout,
-            VoipError::DhtLookupTimeout { .. } => CallEndReason::Timeout,
+            VoipError::QuicConnectionFailed(_) => CallEndReason::FailedNetwork,
+            VoipError::QuicHandshakeTimeout => CallEndReason::Timeout,
+            VoipError::MigrationFailed => CallEndReason::MigrationFailed,
 
             // NAT errors
-            VoipError::Ipv4RandomNat => CallEndReason::FailedIpv4Random,
+            VoipError::NatProbeFailed(_) => CallEndReason::FailedNetwork,
+            VoipError::NatRandomBothSides => CallEndReason::FailedIpv4Random,
             VoipError::UdpBlocked => CallEndReason::FailedUdpBlocked,
             VoipError::TcpBlocked => CallEndReason::FailedTcpBlocked,
-            VoipError::NatCacheExpired { .. } => CallEndReason::Timeout,
-            VoipError::PredictionMiss { .. } => CallEndReason::FailedIpv4Random,
 
             // MASQUE errors
+            VoipError::MasqueProxyUnreachable(_) => CallEndReason::FailedMasqueUnreachable,
+            VoipError::MasqueTunnelFailed(_) => CallEndReason::FailedMasqueUnreachable,
+            VoipError::MasqueTunnelDisconnected => CallEndReason::FailedMasqueUnreachable,
             VoipError::MasqueNoProxy => CallEndReason::FailedMasqueUnreachable,
-            VoipError::MasqueProxyTimeout { .. } => CallEndReason::FailedMasqueUnreachable,
-            VoipError::MasqueCoordinationFailed { .. } => CallEndReason::FailedMasqueUnreachable,
-            VoipError::MasqueAllTransportsFailed => CallEndReason::FailedTcpBlocked,
-            VoipError::MasqueTunnelDisconnected { .. } => CallEndReason::FailedMasqueUnreachable,
+            VoipError::ProxyTokenInvalid => CallEndReason::FailedMasqueUnreachable,
 
             // Signaling errors
-            VoipError::UnknownPeer { .. } => CallEndReason::FailedNetwork,
-            VoipError::PeerOffline { .. } => CallEndReason::Timeout,
-            VoipError::InvalidCallId { .. } => CallEndReason::FailedNetwork,
-            VoipError::CallAlreadyExists { .. } => CallEndReason::FailedNetwork,
-            VoipError::NotCallParticipant { .. } => CallEndReason::FailedNetwork,
+            VoipError::SignalingError(_) => CallEndReason::FailedNetwork,
+            VoipError::JwtAuthFailed(_) => CallEndReason::FailedNetwork,
             VoipError::RateLimited => CallEndReason::FailedNetwork,
-            VoipError::Authentication { .. } => CallEndReason::FailedNetwork,
-            VoipError::InvalidMessage { .. } => CallEndReason::FailedNetwork,
+            VoipError::PeerNotFound(_) => CallEndReason::FailedNetwork,
+            VoipError::PeerOffline(_) => CallEndReason::Timeout,
 
             // State machine errors
-            VoipError::InvalidStateTransition { .. } => CallEndReason::FailedNetwork,
-            VoipError::RetryExhausted { .. } => CallEndReason::FailedIpv4Random,
-            VoipError::Rejected => CallEndReason::Rejected,
+            VoipError::InvalidTransition { .. } => CallEndReason::FailedNetwork,
+            VoipError::CallAlreadyExists(_) => CallEndReason::FailedNetwork,
 
-            // Internal errors
-            VoipError::Internal { .. } => CallEndReason::FailedNetwork,
-            VoipError::Crypto { .. } => CallEndReason::FailedNetwork,
-            VoipError::Serialization { .. } => CallEndReason::FailedNetwork,
-            VoipError::AllMethodsFailed { .. } => CallEndReason::FailedIpv4Random,
+            // DHT errors
+            VoipError::DhtLookupFailed(_) => CallEndReason::FailedNetwork,
+            VoipError::DhtRecordVerificationFailed => CallEndReason::FailedNetwork,
+
+            // Crypto errors
+            VoipError::SignatureVerificationFailed => CallEndReason::FailedNetwork,
+            VoipError::InvalidKeyMaterial(_) => CallEndReason::FailedNetwork,
+
+            // Internal
+            VoipError::Internal(_) => CallEndReason::FailedNetwork,
         }
     }
 
@@ -302,17 +210,15 @@ impl VoipError {
     /// Maps this error to the appropriate code from spec/08 §8.5.
     pub fn to_error_code(&self) -> u32 {
         match self {
-            VoipError::UnknownPeer { .. } => error_codes::UNKNOWN_PEER,
-            VoipError::PeerOffline { .. } => error_codes::PEER_OFFLINE,
-            VoipError::InvalidCallId { .. } => error_codes::INVALID_CALL_ID,
-            VoipError::CallAlreadyExists { .. } => error_codes::CALL_ALREADY_EXISTS,
-            VoipError::NotCallParticipant { .. } => error_codes::NOT_CALL_PARTICIPANT,
+            VoipError::PeerNotFound(_) => error_codes::UNKNOWN_PEER,
+            VoipError::PeerOffline(_) => error_codes::PEER_OFFLINE,
+            VoipError::CallAlreadyExists(_) => error_codes::CALL_ALREADY_EXISTS,
             VoipError::RateLimited => error_codes::RATE_LIMITED,
-            VoipError::Authentication { .. } => error_codes::INVALID_JWT,
-            VoipError::InvalidMessage { .. } => error_codes::INVALID_MESSAGE,
+            VoipError::JwtAuthFailed(_) => error_codes::INVALID_JWT,
+            VoipError::SignalingError(_) => error_codes::INVALID_MESSAGE,
             VoipError::MasqueNoProxy => error_codes::MASQUE_NO_PROXY,
-            VoipError::MasqueProxyTimeout { .. } => error_codes::MASQUE_PROXY_TIMEOUT,
-            VoipError::MasqueCoordinationFailed { .. } => error_codes::MASQUE_COORDINATION_FAILED,
+            VoipError::MasqueProxyUnreachable(_) => error_codes::MASQUE_PROXY_TIMEOUT,
+            VoipError::ProxyTokenInvalid => error_codes::MASQUE_COORDINATION_FAILED,
             _ => error_codes::INTERNAL_ERROR,
         }
     }
@@ -323,10 +229,10 @@ impl VoipError {
     pub fn is_recoverable(&self) -> bool {
         matches!(
             self,
-            VoipError::PathProbeTimeout { .. }
-                | VoipError::DhtLookupTimeout { .. }
-                | VoipError::NatCacheExpired { .. }
-                | VoipError::PredictionMiss { .. }
+            VoipError::QuicHandshakeTimeout
+                | VoipError::NatProbeFailed(_)
+                | VoipError::DhtLookupFailed(_)
+                | VoipError::SignalingError(_)
         )
     }
 
@@ -334,7 +240,7 @@ impl VoipError {
     pub fn is_migratable(&self) -> bool {
         matches!(
             self,
-            VoipError::NetworkChanged | VoipError::MigrationFailed { .. }
+            VoipError::MigrationFailed | VoipError::MasqueTunnelDisconnected
         )
     }
 
@@ -342,14 +248,13 @@ impl VoipError {
     pub fn is_fatal(&self) -> bool {
         matches!(
             self,
-            VoipError::Ipv4RandomNat
+            VoipError::NatRandomBothSides
                 | VoipError::UdpBlocked
                 | VoipError::TcpBlocked
                 | VoipError::MasqueNoProxy
-                | VoipError::MasqueAllTransportsFailed
-                | VoipError::Rejected
-                | VoipError::RetryExhausted { .. }
-                | VoipError::AllMethodsFailed { .. }
+                | VoipError::PeerNotFound(_)
+                | VoipError::SignatureVerificationFailed
+                | VoipError::DhtRecordVerificationFailed
         )
     }
 
@@ -357,138 +262,7 @@ impl VoipError {
     pub fn should_push_retry(&self) -> bool {
         matches!(
             self,
-            VoipError::Ipv4RandomNat
-                | VoipError::PredictionMiss { .. }
-                | VoipError::RetryExhausted { .. }
+            VoipError::NatRandomBothSides | VoipError::MasqueProxyUnreachable(_)
         )
-    }
-}
-
-/// Error type for signaling protocol operations.
-#[derive(Debug, thiserror::Error)]
-pub enum SignalingError {
-    /// WebSocket connection failed
-    #[error("WebSocket connection failed: {reason}")]
-    ConnectionFailed {
-        reason: String,
-    },
-
-    /// WebSocket connection closed unexpectedly
-    #[error("WebSocket connection closed unexpectedly")]
-    ConnectionClosed,
-
-    /// Message encoding error
-    #[error("Message encoding error: {0}")]
-    EncodeError(String),
-
-    /// Message decoding error
-    #[error("Message decoding error: {0}")]
-    DecodeError(String),
-
-    /// Unknown message type
-    #[error("Unknown message type: {type_id:#06x}")]
-    UnknownMessageType {
-        type_id: u16,
-    },
-}
-
-/// Error type for DHT operations.
-#[derive(Debug, thiserror::Error)]
-pub enum DhtError {
-    /// DHT lookup failed
-    #[error("DHT lookup failed for key {key}: {reason}")]
-    LookupFailed {
-        key: String,
-        reason: String,
-    },
-
-    /// DHT registration failed
-    #[error("DHT registration failed: {reason}")]
-    RegistrationFailed {
-        reason: String,
-    },
-
-    /// DHT bootstrap failed
-    #[error("DHT bootstrap failed: {reason}")]
-    BootstrapFailed {
-        reason: String,
-    },
-
-    /// No connected DHT peers
-    #[error("No connected DHT peers")]
-    NoPeers,
-
-    /// Record verification failed
-    #[error("Record verification failed: {reason}")]
-    VerificationFailed {
-        reason: String,
-    },
-
-    /// Record expired
-    #[error("Record expired at {expired_at}")]
-    RecordExpired {
-        expired_at: u64,
-    },
-}
-
-/// Error type for MASQUE tunnel operations.
-#[derive(Debug, thiserror::Error)]
-pub enum MasqueError {
-    /// No proxy available
-    #[error("No MASQUE proxy available")]
-    NoProxy,
-
-    /// Proxy connection timeout
-    #[error("Proxy connection timeout after {timeout_ms}ms")]
-    ProxyTimeout {
-        timeout_ms: u64,
-    },
-
-    /// CONNECT-UDP request rejected
-    #[error("CONNECT-UDP request rejected: status {status}")]
-    ConnectRejected {
-        status: u16,
-    },
-
-    /// All transports failed (HTTP/3 and HTTP/2)
-    #[error("All MASQUE transports failed")]
-    AllTransportsFailed,
-
-    /// Tunnel disconnected
-    #[error("MASQUE tunnel disconnected: {reason}")]
-    TunnelDisconnected {
-        reason: String,
-    },
-
-    /// Proxy capacity exceeded
-    #[error("Proxy capacity exceeded (max {max_sessions})")]
-    CapacityExceeded {
-        max_sessions: u32,
-    },
-
-    /// Proxy token validation failed
-    #[error("Proxy token validation failed: {reason}")]
-    TokenValidationFailed {
-        reason: String,
-    },
-}
-
-impl From<MasqueError> for VoipError {
-    fn from(value: MasqueError) -> Self {
-        match value {
-            MasqueError::NoProxy => VoipError::MasqueNoProxy,
-            MasqueError::ProxyTimeout { timeout_ms } => VoipError::MasqueProxyTimeout { timeout_ms },
-            MasqueError::AllTransportsFailed => VoipError::MasqueAllTransportsFailed,
-            MasqueError::TunnelDisconnected { reason } => {
-                VoipError::MasqueTunnelDisconnected { reason }
-            }
-            MasqueError::ConnectRejected { .. } => VoipError::MasqueCoordinationFailed {
-                reason: "CONNECT-UDP rejected".to_string(),
-            },
-            MasqueError::CapacityExceeded { .. } => VoipError::MasqueNoProxy,
-            MasqueError::TokenValidationFailed { reason } => VoipError::MasqueCoordinationFailed {
-                reason,
-            },
-        }
     }
 }

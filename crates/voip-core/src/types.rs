@@ -27,26 +27,26 @@ pub enum NATType {
     SymmetricRandom = 4,
 }
 
-impl From<proto::NatType> for NATType {
-    fn from(value: proto::NatType) -> Self {
+impl From<proto::signaling::NatType> for NATType {
+    fn from(value: proto::signaling::NatType) -> Self {
         match value {
-            proto::NatType::None => NATType::None,
-            proto::NatType::Cone => NATType::Cone,
-            proto::NatType::SymmetricSequential => NATType::SymmetricSequential,
-            proto::NatType::SymmetricPseudo => NATType::SymmetricPseudo,
-            proto::NatType::SymmetricRandom => NATType::SymmetricRandom,
+            proto::signaling::NatType::NatNone => NATType::None,
+            proto::signaling::NatType::NatCone => NATType::Cone,
+            proto::signaling::NatType::NatSymmetricSequential => NATType::SymmetricSequential,
+            proto::signaling::NatType::NatSymmetricPseudo => NATType::SymmetricPseudo,
+            proto::signaling::NatType::NatSymmetricRandom => NATType::SymmetricRandom,
         }
     }
 }
 
-impl From<NATType> for proto::NatType {
+impl From<NATType> for proto::signaling::NatType {
     fn from(value: NATType) -> Self {
         match value {
-            NATType::None => proto::NatType::None,
-            NATType::Cone => proto::NatType::Cone,
-            NATType::SymmetricSequential => proto::NatType::SymmetricSequential,
-            NATType::SymmetricPseudo => proto::NatType::SymmetricPseudo,
-            NATType::SymmetricRandom => proto::NatType::SymmetricRandom,
+            NATType::None => proto::signaling::NatType::NatNone,
+            NATType::Cone => proto::signaling::NatType::NatCone,
+            NATType::SymmetricSequential => proto::signaling::NatType::NatSymmetricSequential,
+            NATType::SymmetricPseudo => proto::signaling::NatType::NatSymmetricPseudo,
+            NATType::SymmetricRandom => proto::signaling::NatType::NatSymmetricRandom,
         }
     }
 }
@@ -81,22 +81,22 @@ pub enum PredictionConfidence {
     Random = 2,
 }
 
-impl From<proto::PredictionConfidence> for PredictionConfidence {
-    fn from(value: proto::PredictionConfidence) -> Self {
+impl From<proto::signaling::PredictionConfidence> for PredictionConfidence {
+    fn from(value: proto::signaling::PredictionConfidence) -> Self {
         match value {
-            proto::PredictionConfidence::Sequential => PredictionConfidence::Sequential,
-            proto::PredictionConfidence::PseudoSequential => PredictionConfidence::PseudoSequential,
-            proto::PredictionConfidence::Random => PredictionConfidence::Random,
+            proto::signaling::PredictionConfidence::Sequential => PredictionConfidence::Sequential,
+            proto::signaling::PredictionConfidence::PseudoSequential => PredictionConfidence::PseudoSequential,
+            proto::signaling::PredictionConfidence::Random => PredictionConfidence::Random,
         }
     }
 }
 
-impl From<PredictionConfidence> for proto::PredictionConfidence {
+impl From<PredictionConfidence> for proto::signaling::PredictionConfidence {
     fn from(value: PredictionConfidence) -> Self {
         match value {
-            PredictionConfidence::Sequential => proto::PredictionConfidence::Sequential,
-            PredictionConfidence::PseudoSequential => proto::PredictionConfidence::PseudoSequential,
-            PredictionConfidence::Random => proto::PredictionConfidence::Random,
+            PredictionConfidence::Sequential => proto::signaling::PredictionConfidence::Sequential,
+            PredictionConfidence::PseudoSequential => proto::signaling::PredictionConfidence::PseudoSequential,
+            PredictionConfidence::Random => proto::signaling::PredictionConfidence::Random,
         }
     }
 }
@@ -123,18 +123,18 @@ pub enum ProbeMethod {
     QuicPathProbing = 0,
 }
 
-impl From<proto::ProbeMethod> for ProbeMethod {
-    fn from(value: proto::ProbeMethod) -> Self {
+impl From<proto::signaling::ProbeMethod> for ProbeMethod {
+    fn from(value: proto::signaling::ProbeMethod) -> Self {
         match value {
-            proto::ProbeMethod::QuicPathProbing => ProbeMethod::QuicPathProbing,
+            proto::signaling::ProbeMethod::QuicPathProbing => ProbeMethod::QuicPathProbing,
         }
     }
 }
 
-impl From<ProbeMethod> for proto::ProbeMethod {
+impl From<ProbeMethod> for proto::signaling::ProbeMethod {
     fn from(value: ProbeMethod) -> Self {
         match value {
-            ProbeMethod::QuicPathProbing => proto::ProbeMethod::QuicPathProbing,
+            ProbeMethod::QuicPathProbing => proto::signaling::ProbeMethod::QuicPathProbing,
         }
     }
 }
@@ -157,22 +157,22 @@ pub enum DiscoveryMethod {
     Cache = 2,
 }
 
-impl From<proto::DiscoveryMethod> for DiscoveryMethod {
-    fn from(value: proto::DiscoveryMethod) -> Self {
+impl From<proto::signaling::DiscoveryMethod> for DiscoveryMethod {
+    fn from(value: proto::signaling::DiscoveryMethod) -> Self {
         match value {
-            proto::DiscoveryMethod::Dht => DiscoveryMethod::Dht,
-            proto::DiscoveryMethod::Signaling => DiscoveryMethod::Signaling,
-            proto::DiscoveryMethod::Cache => DiscoveryMethod::Cache,
+            proto::signaling::DiscoveryMethod::DiscoveryDht => DiscoveryMethod::Dht,
+            proto::signaling::DiscoveryMethod::DiscoverySignaling => DiscoveryMethod::Signaling,
+            proto::signaling::DiscoveryMethod::DiscoveryCache => DiscoveryMethod::Cache,
         }
     }
 }
 
-impl From<DiscoveryMethod> for proto::DiscoveryMethod {
+impl From<DiscoveryMethod> for proto::signaling::DiscoveryMethod {
     fn from(value: DiscoveryMethod) -> Self {
         match value {
-            DiscoveryMethod::Dht => proto::DiscoveryMethod::Dht,
-            DiscoveryMethod::Signaling => proto::DiscoveryMethod::Signaling,
-            DiscoveryMethod::Cache => proto::DiscoveryMethod::Cache,
+            DiscoveryMethod::Dht => proto::signaling::DiscoveryMethod::DiscoveryDht,
+            DiscoveryMethod::Signaling => proto::signaling::DiscoveryMethod::DiscoverySignaling,
+            DiscoveryMethod::Cache => proto::signaling::DiscoveryMethod::DiscoveryCache,
         }
     }
 }
@@ -195,22 +195,22 @@ pub enum MediaType {
     Screen = 2,
 }
 
-impl From<proto::MediaType> for MediaType {
-    fn from(value: proto::MediaType) -> Self {
+impl From<proto::signaling::MediaType> for MediaType {
+    fn from(value: proto::signaling::MediaType) -> Self {
         match value {
-            proto::MediaType::Audio => MediaType::Audio,
-            proto::MediaType::Video => MediaType::Video,
-            proto::MediaType::Screen => MediaType::Screen,
+            proto::signaling::MediaType::MediaAudio => MediaType::Audio,
+            proto::signaling::MediaType::MediaVideo => MediaType::Video,
+            proto::signaling::MediaType::MediaScreen => MediaType::Screen,
         }
     }
 }
 
-impl From<MediaType> for proto::MediaType {
+impl From<MediaType> for proto::signaling::MediaType {
     fn from(value: MediaType) -> Self {
         match value {
-            MediaType::Audio => proto::MediaType::Audio,
-            MediaType::Video => proto::MediaType::Video,
-            MediaType::Screen => proto::MediaType::Screen,
+            MediaType::Audio => proto::signaling::MediaType::MediaAudio,
+            MediaType::Video => proto::signaling::MediaType::MediaVideo,
+            MediaType::Screen => proto::signaling::MediaType::MediaScreen,
         }
     }
 }
@@ -219,10 +219,14 @@ impl From<MediaType> for proto::MediaType {
 // CallState
 // ============================================================================
 
-/// State of a call in the call lifecycle state machine.
+/// State of a call in the call lifecycle.
 ///
 /// Maps to `voip.signaling.CallState` in the proto schema.
 /// See spec/07 §7.3.1 for the state machine.
+///
+/// Note: The state machine (`crate::state::CallStateMachine`) uses its own
+/// `CallState` which includes an additional `Idle` variant for the
+/// pre-call state. This type maps to the on-the-wire proto representation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(i32)]
 pub enum CallState {
@@ -238,26 +242,26 @@ pub enum CallState {
     Ended = 4,
 }
 
-impl From<proto::CallState> for CallState {
-    fn from(value: proto::CallState) -> Self {
+impl From<proto::signaling::CallState> for CallState {
+    fn from(value: proto::signaling::CallState) -> Self {
         match value {
-            proto::CallState::Ringing => CallState::Ringing,
-            proto::CallState::Accepted => CallState::Accepted,
-            proto::CallState::Connected => CallState::Connected,
-            proto::CallState::Failed => CallState::Failed,
-            proto::CallState::Ended => CallState::Ended,
+            proto::signaling::CallState::CallRinging => CallState::Ringing,
+            proto::signaling::CallState::CallAccepted => CallState::Accepted,
+            proto::signaling::CallState::CallConnected => CallState::Connected,
+            proto::signaling::CallState::CallFailed => CallState::Failed,
+            proto::signaling::CallState::CallEnded => CallState::Ended,
         }
     }
 }
 
-impl From<CallState> for proto::CallState {
+impl From<CallState> for proto::signaling::CallState {
     fn from(value: CallState) -> Self {
         match value {
-            CallState::Ringing => proto::CallState::Ringing,
-            CallState::Accepted => proto::CallState::Accepted,
-            CallState::Connected => proto::CallState::Connected,
-            CallState::Failed => proto::CallState::Failed,
-            CallState::Ended => proto::CallState::Ended,
+            CallState::Ringing => proto::signaling::CallState::CallRinging,
+            CallState::Accepted => proto::signaling::CallState::CallAccepted,
+            CallState::Connected => proto::signaling::CallState::CallConnected,
+            CallState::Failed => proto::signaling::CallState::CallFailed,
+            CallState::Ended => proto::signaling::CallState::CallEnded,
         }
     }
 }
@@ -282,24 +286,24 @@ pub enum SubscriptionState {
     Ended = 3,
 }
 
-impl From<proto::SubscriptionState> for SubscriptionState {
-    fn from(value: proto::SubscriptionState) -> Self {
+impl From<proto::signaling::SubscriptionState> for SubscriptionState {
+    fn from(value: proto::signaling::SubscriptionState) -> Self {
         match value {
-            proto::SubscriptionState::Pending => SubscriptionState::Pending,
-            proto::SubscriptionState::Active => SubscriptionState::Active,
-            proto::SubscriptionState::Paused => SubscriptionState::Paused,
-            proto::SubscriptionState::Ended => SubscriptionState::Ended,
+            proto::signaling::SubscriptionState::SubPending => SubscriptionState::Pending,
+            proto::signaling::SubscriptionState::SubActive => SubscriptionState::Active,
+            proto::signaling::SubscriptionState::SubPaused => SubscriptionState::Paused,
+            proto::signaling::SubscriptionState::SubEnded => SubscriptionState::Ended,
         }
     }
 }
 
-impl From<SubscriptionState> for proto::SubscriptionState {
+impl From<SubscriptionState> for proto::signaling::SubscriptionState {
     fn from(value: SubscriptionState) -> Self {
         match value {
-            SubscriptionState::Pending => proto::SubscriptionState::Pending,
-            SubscriptionState::Active => proto::SubscriptionState::Active,
-            SubscriptionState::Paused => proto::SubscriptionState::Paused,
-            SubscriptionState::Ended => proto::SubscriptionState::Ended,
+            SubscriptionState::Pending => proto::signaling::SubscriptionState::SubPending,
+            SubscriptionState::Active => proto::signaling::SubscriptionState::SubActive,
+            SubscriptionState::Paused => proto::signaling::SubscriptionState::SubPaused,
+            SubscriptionState::Ended => proto::signaling::SubscriptionState::SubEnded,
         }
     }
 }
@@ -322,22 +326,22 @@ pub enum PeerStatus {
     InCall = 2,
 }
 
-impl From<proto::PeerStatus> for PeerStatus {
-    fn from(value: proto::PeerStatus) -> Self {
+impl From<proto::signaling::PeerStatus> for PeerStatus {
+    fn from(value: proto::signaling::PeerStatus) -> Self {
         match value {
-            proto::PeerStatus::Online => PeerStatus::Online,
-            proto::PeerStatus::Offline => PeerStatus::Offline,
-            proto::PeerStatus::InCall => PeerStatus::InCall,
+            proto::signaling::PeerStatus::PeerOnline => PeerStatus::Online,
+            proto::signaling::PeerStatus::PeerOffline => PeerStatus::Offline,
+            proto::signaling::PeerStatus::PeerInCall => PeerStatus::InCall,
         }
     }
 }
 
-impl From<PeerStatus> for proto::PeerStatus {
+impl From<PeerStatus> for proto::signaling::PeerStatus {
     fn from(value: PeerStatus) -> Self {
         match value {
-            PeerStatus::Online => proto::PeerStatus::Online,
-            PeerStatus::Offline => proto::PeerStatus::Offline,
-            PeerStatus::InCall => proto::PeerStatus::InCall,
+            PeerStatus::Online => proto::signaling::PeerStatus::PeerOnline,
+            PeerStatus::Offline => proto::signaling::PeerStatus::PeerOffline,
+            PeerStatus::InCall => proto::signaling::PeerStatus::PeerInCall,
         }
     }
 }
@@ -366,28 +370,28 @@ pub enum ConnectionMethod {
     MasqueHttp2 = 5,
 }
 
-impl From<proto::ConnectionMethod> for ConnectionMethod {
-    fn from(value: proto::ConnectionMethod) -> Self {
+impl From<proto::signaling::ConnectionMethod> for ConnectionMethod {
+    fn from(value: proto::signaling::ConnectionMethod) -> Self {
         match value {
-            proto::ConnectionMethod::None => ConnectionMethod::None,
-            proto::ConnectionMethod::Ipv6Direct => ConnectionMethod::Ipv6Direct,
-            proto::ConnectionMethod::Ipv4Cone => ConnectionMethod::Ipv4Cone,
-            proto::ConnectionMethod::Ipv4Prediction => ConnectionMethod::Ipv4Prediction,
-            proto::ConnectionMethod::Masque => ConnectionMethod::Masque,
-            proto::ConnectionMethod::MasqueHttp2 => ConnectionMethod::MasqueHttp2,
+            proto::signaling::ConnectionMethod::ConnNone => ConnectionMethod::None,
+            proto::signaling::ConnectionMethod::ConnIpv6Direct => ConnectionMethod::Ipv6Direct,
+            proto::signaling::ConnectionMethod::ConnIpv4Cone => ConnectionMethod::Ipv4Cone,
+            proto::signaling::ConnectionMethod::ConnIpv4Prediction => ConnectionMethod::Ipv4Prediction,
+            proto::signaling::ConnectionMethod::ConnMasque => ConnectionMethod::Masque,
+            proto::signaling::ConnectionMethod::ConnMasqueHttp2 => ConnectionMethod::MasqueHttp2,
         }
     }
 }
 
-impl From<ConnectionMethod> for proto::ConnectionMethod {
+impl From<ConnectionMethod> for proto::signaling::ConnectionMethod {
     fn from(value: ConnectionMethod) -> Self {
         match value {
-            ConnectionMethod::None => proto::ConnectionMethod::None,
-            ConnectionMethod::Ipv6Direct => proto::ConnectionMethod::Ipv6Direct,
-            ConnectionMethod::Ipv4Cone => proto::ConnectionMethod::Ipv4Cone,
-            ConnectionMethod::Ipv4Prediction => proto::ConnectionMethod::Ipv4Prediction,
-            ConnectionMethod::Masque => proto::ConnectionMethod::Masque,
-            ConnectionMethod::MasqueHttp2 => proto::ConnectionMethod::MasqueHttp2,
+            ConnectionMethod::None => proto::signaling::ConnectionMethod::ConnNone,
+            ConnectionMethod::Ipv6Direct => proto::signaling::ConnectionMethod::ConnIpv6Direct,
+            ConnectionMethod::Ipv4Cone => proto::signaling::ConnectionMethod::ConnIpv4Cone,
+            ConnectionMethod::Ipv4Prediction => proto::signaling::ConnectionMethod::ConnIpv4Prediction,
+            ConnectionMethod::Masque => proto::signaling::ConnectionMethod::ConnMasque,
+            ConnectionMethod::MasqueHttp2 => proto::signaling::ConnectionMethod::ConnMasqueHttp2,
         }
     }
 }
@@ -451,34 +455,34 @@ pub enum CallEndReason {
     FailedTcpBlocked = 8,
 }
 
-impl From<proto::CallEndReason> for CallEndReason {
-    fn from(value: proto::CallEndReason) -> Self {
+impl From<proto::signaling::CallEndReason> for CallEndReason {
+    fn from(value: proto::signaling::CallEndReason) -> Self {
         match value {
-            proto::CallEndReason::Normal => CallEndReason::Normal,
-            proto::CallEndReason::Rejected => CallEndReason::Rejected,
-            proto::CallEndReason::Timeout => CallEndReason::Timeout,
-            proto::CallEndReason::FailedIpv4Random => CallEndReason::FailedIpv4Random,
-            proto::CallEndReason::FailedUdpBlocked => CallEndReason::FailedUdpBlocked,
-            proto::CallEndReason::FailedNetwork => CallEndReason::FailedNetwork,
-            proto::CallEndReason::MigrationFailed => CallEndReason::MigrationFailed,
-            proto::CallEndReason::FailedMasqueUnreachable => CallEndReason::FailedMasqueUnreachable,
-            proto::CallEndReason::FailedTcpBlocked => CallEndReason::FailedTcpBlocked,
+            proto::signaling::CallEndReason::EndNormal => CallEndReason::Normal,
+            proto::signaling::CallEndReason::EndRejected => CallEndReason::Rejected,
+            proto::signaling::CallEndReason::EndTimeout => CallEndReason::Timeout,
+            proto::signaling::CallEndReason::EndFailedIpv4Random => CallEndReason::FailedIpv4Random,
+            proto::signaling::CallEndReason::EndFailedUdpBlocked => CallEndReason::FailedUdpBlocked,
+            proto::signaling::CallEndReason::EndFailedNetwork => CallEndReason::FailedNetwork,
+            proto::signaling::CallEndReason::EndMigrationFailed => CallEndReason::MigrationFailed,
+            proto::signaling::CallEndReason::EndFailedMasqueUnreachable => CallEndReason::FailedMasqueUnreachable,
+            proto::signaling::CallEndReason::EndFailedTcpBlocked => CallEndReason::FailedTcpBlocked,
         }
     }
 }
 
-impl From<CallEndReason> for proto::CallEndReason {
+impl From<CallEndReason> for proto::signaling::CallEndReason {
     fn from(value: CallEndReason) -> Self {
         match value {
-            CallEndReason::Normal => proto::CallEndReason::Normal,
-            CallEndReason::Rejected => proto::CallEndReason::Rejected,
-            CallEndReason::Timeout => proto::CallEndReason::Timeout,
-            CallEndReason::FailedIpv4Random => proto::CallEndReason::FailedIpv4Random,
-            CallEndReason::FailedUdpBlocked => proto::CallEndReason::FailedUdpBlocked,
-            CallEndReason::FailedNetwork => proto::CallEndReason::FailedNetwork,
-            CallEndReason::MigrationFailed => proto::CallEndReason::MigrationFailed,
-            CallEndReason::FailedMasqueUnreachable => proto::CallEndReason::FailedMasqueUnreachable,
-            CallEndReason::FailedTcpBlocked => proto::CallEndReason::FailedTcpBlocked,
+            CallEndReason::Normal => proto::signaling::CallEndReason::EndNormal,
+            CallEndReason::Rejected => proto::signaling::CallEndReason::EndRejected,
+            CallEndReason::Timeout => proto::signaling::CallEndReason::EndTimeout,
+            CallEndReason::FailedIpv4Random => proto::signaling::CallEndReason::EndFailedIpv4Random,
+            CallEndReason::FailedUdpBlocked => proto::signaling::CallEndReason::EndFailedUdpBlocked,
+            CallEndReason::FailedNetwork => proto::signaling::CallEndReason::EndFailedNetwork,
+            CallEndReason::MigrationFailed => proto::signaling::CallEndReason::EndMigrationFailed,
+            CallEndReason::FailedMasqueUnreachable => proto::signaling::CallEndReason::EndFailedMasqueUnreachable,
+            CallEndReason::FailedTcpBlocked => proto::signaling::CallEndReason::EndFailedTcpBlocked,
         }
     }
 }
@@ -531,6 +535,25 @@ impl CallEndReason {
 }
 
 // ============================================================================
+// Helper: convert i32 proto enum field to our native enum
+// ============================================================================
+
+/// Convert a prost i32 enum field to our native enum via the proto enum.
+/// Falls back to the default (discriminant 0) on unknown values.
+fn i32_to_native_enum<E, N>(value: i32) -> N
+where
+    E: TryFrom<i32> + Into<N>,
+{
+    E::try_from(value)
+        .ok()
+        .map(Into::into)
+        .unwrap_or_else(|| {
+            // Fall back to value 0, which is the proto3 default
+            E::try_from(0).ok().map(Into::into).unwrap()
+        })
+}
+
+// ============================================================================
 // Composite Structs
 // ============================================================================
 
@@ -557,35 +580,37 @@ pub struct PortPredictionData {
     pub probe_method: ProbeMethod,
 }
 
-impl PortPredictionData {
-    /// Creates a new port prediction from a proto PortPrediction message.
-    pub fn from_proto(proto: &proto::PortPrediction) -> Self {
+impl From<proto::signaling::PortPrediction> for PortPredictionData {
+    fn from(proto: proto::signaling::PortPrediction) -> Self {
         Self {
-            external_ip: proto.external_ip.clone(),
+            external_ip: proto.external_ip,
             predicted_port_start: proto.predicted_port_start,
             predicted_port_end: proto.predicted_port_end,
-            confidence: proto.confidence().into(),
+            confidence: i32_to_native_enum::<proto::signaling::PredictionConfidence, _>(proto.confidence),
             base_port: proto.base_port,
             delta_pattern: proto.delta_pattern,
             probed_at: proto.probed_at,
-            probe_method: proto.probe_method().into(),
+            probe_method: i32_to_native_enum::<proto::signaling::ProbeMethod, _>(proto.probe_method),
         }
     }
+}
 
-    /// Converts to a proto PortPrediction message.
-    pub fn to_proto(&self) -> proto::PortPrediction {
-        proto::PortPrediction {
-            external_ip: self.external_ip.clone(),
-            predicted_port_start: self.predicted_port_start,
-            predicted_port_end: self.predicted_port_end,
-            confidence: self.confidence.into(),
-            base_port: self.base_port,
-            delta_pattern: self.delta_pattern,
-            probed_at: self.probed_at,
-            probe_method: self.probe_method.into(),
+impl From<PortPredictionData> for proto::signaling::PortPrediction {
+    fn from(data: PortPredictionData) -> Self {
+        Self {
+            external_ip: data.external_ip,
+            predicted_port_start: data.predicted_port_start,
+            predicted_port_end: data.predicted_port_end,
+            confidence: proto::signaling::PredictionConfidence::from(data.confidence) as i32,
+            base_port: data.base_port,
+            delta_pattern: data.delta_pattern,
+            probed_at: data.probed_at,
+            probe_method: proto::signaling::ProbeMethod::from(data.probe_method) as i32,
         }
     }
+}
 
+impl PortPredictionData {
     /// Returns the size of the predicted port range.
     pub fn range_size(&self) -> u32 {
         self.predicted_port_end.saturating_sub(self.predicted_port_start) + 1
@@ -593,7 +618,9 @@ impl PortPredictionData {
 
     /// Returns true if the prediction is worth attempting.
     pub fn is_usable(&self) -> bool {
-        self.confidence.is_predictable() && self.predicted_port_start > 0 && self.predicted_port_end >= self.predicted_port_start
+        self.confidence.is_predictable()
+            && self.predicted_port_start > 0
+            && self.predicted_port_end >= self.predicted_port_start
     }
 }
 
@@ -618,30 +645,30 @@ pub struct TrackInfo {
     pub frame_duration_ms: u32,
 }
 
-impl TrackInfo {
-    /// Creates a TrackInfo from a proto TrackAnnouncement message.
-    pub fn from_proto(proto: &proto::TrackAnnouncement) -> Self {
+impl From<proto::signaling::TrackAnnouncement> for TrackInfo {
+    fn from(proto: proto::signaling::TrackAnnouncement) -> Self {
         Self {
-            track_namespace: proto.track_namespace.clone(),
-            codec: proto.codec.clone(),
+            track_namespace: proto.track_namespace,
+            codec: proto.codec,
             priority: proto.priority,
-            media_type: proto.media_type().into(),
+            media_type: i32_to_native_enum::<proto::signaling::MediaType, _>(proto.media_type),
             bitrate_max: proto.bitrate_max,
             bitrate_min: proto.bitrate_min,
             frame_duration_ms: proto.frame_duration_ms,
         }
     }
+}
 
-    /// Converts to a proto TrackAnnouncement message.
-    pub fn to_proto(&self) -> proto::TrackAnnouncement {
-        proto::TrackAnnouncement {
-            track_namespace: self.track_namespace.clone(),
-            codec: self.codec.clone(),
-            priority: self.priority,
-            media_type: self.media_type.into(),
-            bitrate_max: self.bitrate_max,
-            bitrate_min: self.bitrate_min,
-            frame_duration_ms: self.frame_duration_ms,
+impl From<TrackInfo> for proto::signaling::TrackAnnouncement {
+    fn from(data: TrackInfo) -> Self {
+        Self {
+            track_namespace: data.track_namespace,
+            codec: data.codec,
+            priority: data.priority,
+            media_type: proto::signaling::MediaType::from(data.media_type) as i32,
+            bitrate_max: data.bitrate_max,
+            bitrate_min: data.bitrate_min,
+            frame_duration_ms: data.frame_duration_ms,
         }
     }
 }
@@ -655,6 +682,24 @@ pub struct NATInfo {
     pub nat_type: NATType,
     /// Port prediction data (None if IPv6 or Cone NAT)
     pub prediction: Option<PortPredictionData>,
+}
+
+impl From<proto::signaling::NatInfo> for NATInfo {
+    fn from(proto: proto::signaling::NatInfo) -> Self {
+        Self {
+            nat_type: i32_to_native_enum::<proto::signaling::NatType, _>(proto.nat_type),
+            prediction: proto.prediction.map(Into::into),
+        }
+    }
+}
+
+impl From<NATInfo> for proto::signaling::NatInfo {
+    fn from(data: NATInfo) -> Self {
+        Self {
+            nat_type: proto::signaling::NatType::from(data.nat_type) as i32,
+            prediction: data.prediction.map(Into::into),
+        }
+    }
 }
 
 impl NATInfo {
@@ -684,22 +729,6 @@ impl NATInfo {
         Self {
             nat_type,
             prediction: Some(prediction),
-        }
-    }
-
-    /// Creates a NATInfo from a proto NATInfo message.
-    pub fn from_proto(proto: &proto::NatInfo) -> Self {
-        Self {
-            nat_type: proto.nat_type().into(),
-            prediction: proto.prediction.as_ref().map(PortPredictionData::from_proto),
-        }
-    }
-
-    /// Converts to a proto NATInfo message.
-    pub fn to_proto(&self) -> proto::NatInfo {
-        proto::NatInfo {
-            nat_type: self.nat_type.into(),
-            prediction: self.prediction.as_ref().map(|p| p.to_proto()),
         }
     }
 
