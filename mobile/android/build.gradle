@@ -1,0 +1,88 @@
+/// Android AAR build script for Three Pillars VoIP.
+///
+/// This script builds the native Rust library for Android targets
+/// and generates Kotlin bindings via UniFFI.
+///
+/// Prerequisites:
+/// - Android NDK installed (ANDROID_NDK_HOME set)
+/// - Rust Android targets: `rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android`
+/// - cargo-ndk: `cargo install cargo-ndk`
+///
+/// Build:
+/// ```
+/// ./gradlew assembleRelease
+/// ```
+///
+/// The resulting AAR will be in `mobile/android/build/outputs/aar/`
+
+plugins {
+    id 'com.android.library'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.threepillars.voip'
+    compileSdk 34
+
+    defaultConfig {
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "0.1.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        consumerProguardFiles "consumer-rules.pro"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+
+    // JNA dependency for UniFFI
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ['src/main/jniLibs']
+        }
+    }
+}
+
+dependencies {
+    implementation 'net.java.dev.jna:jna:5.14.0@aar'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0'
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.1.5'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
+}
+
+// Task to build Rust library for all Android targets
+task buildRustLibraries(type: Exec) {
+    workingDir file("${project.rootDir}/../..")
+    commandLine 'cargo', 'ndk', '-t', 'arm64-v8a', '-t', 'armeabi-v7a', '-t', 'x86_64',
+                '-o', file('src/main/jniLibs').absolutePath,
+                'build', '--release', '-p', 'voip-ffi'
+}
+
+// Task to generate Kotlin bindings via UniFFI
+task generateKotlinBindings(type: Exec) {
+    dependsOn buildRustLibraries
+    workingDir file("${project.rootDir}/../..")
+    commandLine 'cargo', 'run', '--bin', 'uniffi-bindgen',
+                'generate', '--library',
+                file('src/main/jniLibs/arm64-v8a/libvoip_ffi.so').absolutePath,
+                '--language', 'kotlin',
+                '--out-dir', file('src/main/java').absolutePath
+}
+
+tasks.preBuild.dependsOn(generateKotlinBindings)
