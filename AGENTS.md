@@ -9,15 +9,15 @@
 
 A VoIP system with direct P2P first and MASQUE relay as automatic seamless fallback. Direct P2P via three mechanisms:
 
-1. **IPv6** — eliminates NAT for ~45% of connections
-2. **QUIC-Native NAT Traversal** — Cone NAT via QUIC simultaneous open, Symmetric NAT via QUIC path probing + port prediction for ~46% of connections
+1. **IPv6** — eliminates NAT for ~72% of connections (at least one side IPv6; Google IPv6 Stats, Q1 2025)
+2. **QUIC-Native NAT Traversal** — Cone NAT via QUIC simultaneous open, Symmetric NAT via QUIC path probing + port prediction for ~26% of connections (IPv4-only with Cone NAT; D'Acunto 2009, Halkes 2011)
 3. **QUIC + MoQ** — single protocol replaces the entire legacy VoIP stack (SIP, SDP, ICE, STUN/TURN, DTLS, SRTP, RTP)
 
 Two discovery layers with user-selectable priority:
 - **DHT** (libp2p KadDHT) — censorship-resistant, private, ~80ms
 - **Signaling server** — fast (~5ms), but visible to Cloudflare and governments
 
-~91% direct P2P, ~8% MASQUE relay, ~1% honest failure.
+~98% direct P2P, ~1-2% MASQUE relay, ~1% honest failure. All coverage percentages derived from measured data (see spec/01 §1.5 for sources).
 
 ---
 

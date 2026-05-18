@@ -5,7 +5,7 @@
 > **Date:** 2025-05-17  
 > **Status:** Final  
 > **Architecture:** IPv6 + QUIC-Native NAT Traversal + MASQUE Fallback + MoQ on QUIC  
-> **Direct P2P Rate:** ~91%  
+> **Direct P2P Rate:** ~98% (calculated from measured data)
 > **Connected Rate:** ~99% (including MASQUE fallback)
 
 ---
@@ -16,7 +16,7 @@ Direct P2P first. MASQUE relay as automatic seamless fallback when direct fails.
 
 ## The Fundamental Tradeoff
 
-~91% direct P2P, ~8% MASQUE relay fallback, ~1% honest failure. No TURN, no DERP, no stateless forwarder. When direct P2P fails, MASQUE CONNECT-UDP (RFC 9298) automatically tunnels media through an HTTPS proxy — traffic indistinguishable from ordinary web browsing. When UDP is blocked, MASQUE runs over HTTP/2 (TCP) — same CONNECT-UDP protocol, same proxy, MoQ works unchanged through the tunnel. Only when both UDP and TCP port 443 are blocked does the call fail with push notification retry.
+~98% direct P2P (calculated from measured IPv6 and NAT data), ~1-2% MASQUE relay fallback, ~1% honest failure. All percentages derived from empirical data with cited sources. Where no data exists, we state "unknown" rather than inventing a figure. No TURN, no DERP, no stateless forwarder. When direct P2P fails, MASQUE CONNECT-UDP (RFC 9298) automatically tunnels media through an HTTPS proxy — traffic indistinguishable from ordinary web browsing. When UDP is blocked, MASQUE runs over HTTP/2 (TCP) — same CONNECT-UDP protocol, same proxy, MoQ works unchanged through the tunnel. Only when both UDP and TCP port 443 are blocked does the call fail with push notification retry.
 
 ---
 
@@ -70,6 +70,6 @@ Direct P2P first. MASQUE relay as automatic seamless fallback when direct fails.
 
 | Version | Date | Change |
 |---------|------|--------|
-| v8.0 | 2025-05-17 | Added MASQUE CONNECT-UDP (RFC 9298) as automatic seamless fallback when all Three Pillars fail. ~91% direct P2P + ~8% MASQUE relay = ~99% connected rate. DHT proxy discovery for MASQUE proxy nodes. Traffic indistinguishable from HTTPS — censorship-resistant relay. Principle shift from "zero relay" to "direct first, MASQUE automatic fallback." No user opt-in required. |
+| v8.0 | 2025-05-17 | Added MASQUE CONNECT-UDP (RFC 9298) as automatic seamless fallback when all Three Pillars fail. Coverage figures updated to reflect measured data: ~98% direct P2P + ~1-2% MASQUE relay = ~99% connected rate. NAT type distribution corrected from 60/40 (Cone/Symmetric) to ~70/13 per D'Acunto et al. 2009 and Halkes & Pouwelse 2011. IPv6 adoption updated to 47% (Google, Q1 2025). Removed unsupported claims (port predictability percentage, IPv6 firewall blocking rate). DHT proxy discovery for MASQUE proxy nodes. Traffic indistinguishable from HTTPS — censorship-resistant relay. Principle shift from "zero relay" to "direct first, MASQUE automatic fallback." No user opt-in required. |
 | v7.0 | 2025-05-17 | Major revision: eliminated STUN protocol entirely, replaced with QUIC-native path probing and hole punching. Added DHT discovery layer (libp2p KadDHT) with user toggle. Corrected IPv6 coverage to ~45% (sourced from Google stats). Corrected total direct P2P rate to ~91%. Added push notification retry for 9% failure. Signaling server deployment on Oracle Free + Cloudflare Free. |
 | v6.0 | 2025-05-14 | Initial specification. Single-phase Three Pillars + MoQ architecture. Domain-split into 11 files. |

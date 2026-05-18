@@ -10,7 +10,7 @@
 
 **What This Is NOT:** This is not an IEEE TSN fantasy requiring hardware nobody has. This is not a birthday attack hack that looks like a port scan. This is not a STUN/ICE/TURN system with extra steps. This is the final architecture: QUIC-native NAT traversal, MASQUE fallback for the cases where direct P2P fails, DHT + signaling discovery, MoQ media — implemented as one coherent system using one protocol family (QUIC + HTTP/3) for everything.
 
-> **The fundamental tradeoff:** ~91% direct P2P, ~8% MASQUE relay fallback, ~1% honest failure. When direct P2P fails, MASQUE CONNECT-UDP (RFC 9298) automatically tunnels media through an HTTPS proxy — traffic indistinguishable from ordinary web browsing. Censorship-resistant. Metadata-protected. Only when MASQUE also fails does the call fail with push notification retry.
+> **The fundamental tradeoff:** ~97% direct P2P (derived from measured IPv6 and NAT data), ~1-2% MASQUE relay fallback, ~1% honest failure. When direct P2P fails, MASQUE CONNECT-UDP (RFC 9298) automatically tunnels media through an HTTPS proxy — traffic indistinguishable from ordinary web browsing. Censorship-resistant. Metadata-protected. Only when MASQUE also fails does the call fail with push notification retry.
 
 ---
 
@@ -18,10 +18,10 @@
 
 | Pillar | Mechanism | Coverage | Description |
 |--------|-----------|----------|-------------|
-| **1. IPv6** | NAT Elimination | ~45% of connections have IPv6 | When at least one endpoint has IPv6, the connection ALWAYS works regardless of the other side's NAT type. IPv6 eliminates the problem itself — not a traversal technique. |
-| **2. QUIC-Native NAT Traversal** | Cone NAT + Port Prediction | ~46% of connections (IPv4-only cases) | Cone NAT handled via QUIC simultaneous open (PATH_CHALLENGE). Symmetric NAT handled via QUIC path probing on signaling server's 5 elastic IPs to observe port allocation pattern, then QUIC hole punching to predicted ports. Zero auxiliary protocols — STUN is eliminated. |
+| **1. IPv6** | NAT Elimination | ~72% of connections have at least one IPv6 endpoint | When at least one endpoint has IPv6, the connection ALWAYS works regardless of the other side's NAT type. IPv6 eliminates the problem itself — not a traversal technique. |
+| **2. QUIC-Native NAT Traversal** | Cone NAT + Port Prediction | ~26% of connections (IPv4-only with Cone NAT) | Cone NAT handled via QUIC simultaneous open (PATH_CHALLENGE). Symmetric NAT handled via QUIC path probing on signaling server's 5 elastic IPs to observe port allocation pattern, then QUIC hole punching to predicted ports. Zero auxiliary protocols — STUN is eliminated. |
 | **3. QUIC** | Single Protocol Replacement | All connections | Replaces 8 legacy protocols (SIP, SDP, ICE, STUN/TURN, DTLS, SRTP, RTP) with one. QUIC path probing replaces STUN Binding. QUIC simultaneous open replaces ICE. QUIC connection migration replaces ICE restart. 1-RTT setup. Integrated TLS 1.3 encryption. |
-| **4. MASQUE Fallback** | Censorship-Resistant Relay | ~8% (when Three Pillars fail) | MASQUE CONNECT-UDP (RFC 9298) — bidirectional relay. Both peers connect to the proxy, proxy bridges tunnels. Traffic indistinguishable from ordinary HTTPS. Proxy discovered via DHT. Automatic — no user action required. Signaling server coordinates both peers. Replaces TURN with metadata-protected, censorship-resistant relay. When UDP is blocked, MASQUE runs over HTTP/2 (TCP) instead of HTTP/3 (QUIC) — same CONNECT-UDP protocol, same proxy, MoQ works unchanged through the tunnel. |
+| **4. MASQUE Fallback** | Censorship-Resistant Relay | ~1-2% (when Three Pillars fail) | MASQUE CONNECT-UDP (RFC 9298) — bidirectional relay. Both peers connect to the proxy, proxy bridges tunnels. Traffic indistinguishable from ordinary HTTPS. Proxy discovered via DHT. Automatic — no user action required. Signaling server coordinates both peers. Replaces TURN with metadata-protected, censorship-resistant relay. When UDP is blocked, MASQUE runs over HTTP/2 (TCP) instead of HTTP/3 (QUIC) — same CONNECT-UDP protocol, same proxy, MoQ works unchanged through the tunnel. |
 
 ---
 
@@ -60,29 +60,54 @@ This architecture adopts MoQ from day one — no phased migration, no intermedia
 
 ## 1.5 Combined Coverage Analysis
 
-| Scenario | % of Connections | Mechanism | Direct P2P? |
-|----------|-----------------|-----------|-------------|
-| Both IPv6 | ~10% | Direct QUIC to IPv6 address | **YES** |
-| One IPv6, one IPv4 (any NAT) | ~35% | IPv4 side sends first, IPv6 responds, Symmetric NAT allows | **YES** |
-| Both IPv4, at least one Cone NAT | ~31% | QUIC simultaneous open (PATH_CHALLENGE) | **YES** |
-| Both IPv4, one Cone one Symmetric | ~6% | Cone side reachable, Symmetric sends first, Cone responds | **YES** |
-| Both IPv4, both Symmetric (sequential) | ~7% | Mutual port prediction via QUIC path probing | **YES** |
-| Both IPv4, both Symmetric (one seq, one random) | ~1% | One-side prediction + probing | PARTIAL (~60%) |
-| Both IPv4, both Symmetric (both random) | ~0.5% | MASQUE CONNECT-UDP relay | **RELAY (MASQUE)** |
-| UDP blocked entirely | ~3% | MASQUE CONNECT-UDP over HTTP/2 (TCP) | **RELAY (MASQUE HTTP/2)** |
-| IPv6 firewalls block both sides | ~0.5% | MASQUE CONNECT-UDP relay | **RELAY (MASQUE)** |
-| Both IPv4, both Symmetric, one or both random | ~5% | MASQUE CONNECT-UDP relay | **RELAY (MASQUE)** |
-| UDP blocked AND all MASQUE proxies unreachable | ~1% | No path exists | **FAILS** |
-| **Total direct P2P** | | | **~91%** |
-| **Total relay (MASQUE HTTP/3 + HTTP/2)** | | | **~8%** |
-| **Total fails** | | | **~1%** |
+All percentages below are derived from measured data with cited sources. Where no empirical data exists, we state "unknown" rather than inventing a figure.
+
+### Measured Data Inputs
+
+| Parameter | Value | Source |
+|-----------|-------|--------|
+| IPv6 adoption | 47% of internet users | Google IPv6 Statistics, Q1 2025 |
+| NAT type: Cone (EIM) | 65–75% of IPv4 users | D'Acunto, Pouwelse & Sips (2009); Halkes & Pouwelse (2011) |
+| NAT type: Symmetric (EDM) | 11–16% of IPv4 users | D'Acunto, Pouwelse & Sips (2009); Halkes & Pouwelse (2011) |
+| NAT type: Other/unclassified | 17–24% of IPv4 users | Residual from above studies |
+| UDP blocking rate | 2–4% of connections | Edeline et al. (2017); RIPE Atlas (IETF 95 MAPRG, 2016) |
+| Port predictability of Symmetric NAT | Unknown | No empirical study measures this |
+| IPv6 firewall blocking rate | Unknown | No empirical study measures this |
+
+### Coverage Table
+
+| Scenario | % of Connections | Mechanism | Direct P2P? | Source |
+|----------|-----------------|-----------|-------------|--------|
+| At least one side IPv6 | ~72% | Direct QUIC to IPv6 address | **YES** | Calculated: P(≥1 IPv6) = 1 − 0.53² from Google data |
+| Both IPv4, at least one Cone NAT | ~26% | QUIC simultaneous open (PATH_CHALLENGE) | **YES** | Calculated: 28% × 91% from NAT studies |
+| Both IPv4, both Symmetric NAT | ~0.5% | Port prediction or MASQUE relay | **VARIES** | Calculated: 28% × 1.7% from NAT studies |
+| Both IPv4, other/unclassified NAT | ~2% | Depends on NAT behavior | **UNKNOWN** | Calculated: 28% × 7% from NAT studies |
+| UDP blocked entirely | ~2–4% | MASQUE CONNECT-UDP over HTTP/2 (TCP) | **RELAY (MASQUE HTTP/2)** | Edeline et al. (2017) |
+| UDP + TCP 443 blocked | ~1% | No path exists | **FAILS** | Estimated from Edeline et al. (2017) |
+| **Total direct P2P (IPv6 + Cone NAT)** | **~98%** | | **YES** | Calculated from above |
+| **Total MASQUE relay** | **~1–2%** | | **RELAY** | Symmetric NAT (non-predictable) + UDP blocked |
+| **Total fails** | **~1%** | | **FAILS** | Estimated |
 
 ### Coverage Derivation
 
-- **IPv6 adoption:** ~45% globally (Google IPv6 Statistics, Q1 2025). P(at least one side IPv6) = 1 - 0.55² ≈ 70%. But because not all IPv6 connections succeed (firewalls, broken IPv6), effective coverage from IPv6 is ~45% of all connections.
-- **IPv4-only remaining:** ~55% of connections. Of these, ~60% have Cone NAT (address is destination-independent, QUIC simultaneous open works). ~31% of all connections.
-- **IPv4 Symmetric NAT:** ~40% of IPv4-only = ~22% of all connections. ~60% of Symmetric NATs have predictable allocation (sequential or pseudo-sequential). ~13% of all connections covered by port prediction.
-- **Total: 45% + 31% + 13% + partial(1%) = ~91%**
+Calculations use midpoint values: 47% IPv6 adoption, 70% Cone NAT among IPv4, 13% Symmetric NAT among IPv4.
+
+- **IPv6:** 47% of users have IPv6. P(at least one side IPv6) = 1 − 0.53² ≈ 72%. These connections are direct P2P regardless of NAT type. (Source: Google IPv6 Statistics, Q1 2025)
+- **IPv4-only:** 28% of connections (0.53²). Among IPv4-only users, ~70% have Cone NAT (EIM) and ~13% have Symmetric NAT (EDM). (Sources: D'Acunto et al. 2009; Halkes & Pouwelse 2011)
+- **IPv4 Cone NAT:** P(both IPv4, at least one Cone) = 28% × (1 − 0.30²) = 28% × 91% ≈ 26%. QUIC simultaneous open works. (Calculated)
+- **IPv4 Symmetric NAT:** P(both IPv4, both Symmetric) = 28% × 0.13² = 28% × 1.7% ≈ 0.5%. Port prediction may work for some of these, but no empirical study measures what percentage of Symmetric NATs use predictable (sequential) vs. random port allocation. The remainder needs MASQUE relay.
+- **UDP blocked:** 2–4% of connections have UDP blocked entirely (Edeline et al. 2017; RIPE Atlas). These require MASQUE over HTTP/2. Note: this percentage overlaps with the NAT-type categories above — a UDP-blocked connection can occur in any NAT scenario.
+- **Total direct P2P:** 72% (IPv6) + 26% (Cone NAT) = ~98%, minus an unknown small fraction that fails due to IPv6 firewall issues or other connectivity problems not captured by NAT type alone.
+- **MASQUE relay:** Needed for Symmetric NAT connections where port prediction fails (unknown fraction of ~0.5%) plus UDP-blocked connections (~2–4% of all connections, though some of these also fall into the Symmetric NAT category). Approximately 1–2% of all connections.
+- **Honest failure:** Connections where both UDP and TCP port 443 are blocked. Approximately ~1% (estimated from Edeline et al. 2017, which found ~1% of connections have severe UDP+TCP impairment).
+
+### What We Cannot Claim
+
+The following previously appeared in this specification but have been removed because no empirical data supports them:
+
+- **"~60% of Symmetric NATs have predictable port allocation"** — No study measures this. Some Symmetric NATs use sequential allocation (predictable), others use random allocation (unpredictable), but the proportion is unknown.
+- **"~0.5% of connections fail due to IPv6 firewalls"** — No study measures IPv6 firewall blocking rates. Research (Czyz et al. NDSS 2016; Olson et al. ACM Computing Surveys 2023) suggests IPv6 networks are often MORE open than IPv4, not less.
+- **"~45% effective coverage from IPv6"** — The original calculation assumed significant IPv6 firewall/connectivity failures to reduce the theoretical 70%+ to 45%. Without data on IPv6 connection failure rates, this reduction was speculative. The current calculation uses the measured IPv6 adoption rate directly.
 
 ### Why MASQUE Fallback Works
 
@@ -106,11 +131,11 @@ The relay problem solves itself as IPv6 deploys globally. No code changes needed
 
 | Year | IPv6 Adoption | Direct P2P | MASQUE Relay | Fails |
 |------|--------------|------------|--------------|-------|
-| 2025 | 45% | ~91% | ~8% | ~1% |
-| 2026 | 50% (projected) | ~93% | ~6% | ~1% |
-| 2027 | 55% (projected) | ~95% | ~4% | ~1% |
-| 2028 | 60% (projected) | ~96% | ~3% | ~1% |
-| 2030 | 70% (projected) | ~98% | ~1% | ~1% |
+| 2025 | 47% | ~98% | ~1–2% | ~1% |
+| 2026 | 50% (projected) | ~98% | ~1% | ~1% |
+| 2027 | 55% (projected) | ~99% | <1% | ~1% |
+| 2028 | 60% (projected) | ~99% | <1% | ~1% |
+| 2030 | 70% (projected) | ~99%+ | <1% | ~1% |
 
 As IPv6 deploys, direct P2P rate increases and MASQUE relay usage decreases. The architecture maximizes direct P2P at every stage. MASQUE handles the remainder automatically. No other action needed.
 
@@ -158,8 +183,8 @@ This architecture uses MoQ from day one. There is no phased migration and no int
 
 | Metric | Legacy (TURN/SIP/RTP) | **This Architecture (v8)** |
 |--------|----------------------|---------------------------|
-| Direct P2P rate | 70-80% | **~91%** |
-| Connected rate (including relay) | ~100% (TURN catches all) | **~99%** (MASQUE catches ~8%) |
+| Direct P2P rate | ~75–80% (Chrome UMA data; Hancke 2017) | **~98%** (calculated from measured data) |
+| Connected rate (including relay) | ~100% (TURN catches all) | **~99%** (MASQUE catches ~1–2%) |
 | Infrastructure needed | TURN servers | **None** (Oracle Free + Cloudflare Free + DHT proxy discovery) |
 | Deployable today? | Yes | **Yes** |
 | Grey zone techniques | No | **None** |

@@ -17,7 +17,7 @@ This is not a traversal technique — it is the **elimination of the problem its
 
 | Region / Metric | IPv6 Adoption | Source |
 |-----------------|---------------|--------|
-| Global (Google) | ~45% | Google IPv6 Statistics |
+| Global (Google) | ~47% | Google IPv6 Statistics, Q1 2025 |
 | T-Mobile US (mobile) | 90%+ | APNIC Labs |
 | Reliance Jio (mobile) | >92% | APNIC Labs |
 | India (overall) | ~62% | APNIC Labs |
@@ -25,17 +25,17 @@ This is not a traversal technique — it is the **elimination of the problem its
 | US (overall) | ~50% | APNIC Labs |
 | Enterprise | ~30-40% | Estimated |
 
-**Important:** The global average of ~45% is the correct figure for coverage calculations. The 70%+ figures cited for some markets (US mobile, India) are regional peaks, not global baselines. Using Google's measurement (which tracks actual IPv6 usage across all Google services globally), approximately 45% of Internet connections have IPv6 as of early 2025.
+**Important:** The global average of ~47% is the correct figure for coverage calculations. The 70%+ figures cited for some markets (US mobile, India) are regional peaks, not global baselines. Using Google's measurement (which tracks actual IPv6 usage across all Google services globally), approximately 47% of Internet connections have IPv6 as of Q1 2025. P(at least one side IPv6) = 1 − 0.53² ≈ 72%.
 
 ---
 
 ## 2.3 How It Eliminates Relay
 
-### When both endpoints have IPv6 (~10% of connections)
+### When both endpoints have IPv6 (~22% of connections)
 
 Direct QUIC connection. No NAT. No path probing. No simultaneous open. The QUIC connection is established in 1 RTT to the peer's IPv6 address. The only failure mode is a stateful IPv6 firewall that blocks inbound connections — but even then, the firewall allows responses to outbound connections, so at least one side can initiate and the other responds.
 
-### When one endpoint has IPv6 (~35% of connections)
+### When one endpoint has IPv6 (~50% of connections)
 
 This is the critical insight that is often overlooked. When at least one side has IPv6, the connection ALWAYS works, regardless of the other side's NAT type. Here is the exact mechanism for the hardest case — one IPv6, one IPv4 Symmetric NAT with random allocation:
 
@@ -58,15 +58,15 @@ Step 3: A sends a QUIC response to 198.51.100.7:42837
 
 The key: A's IPv6 address is the DESTINATION of B's outbound packet, so B's Symmetric NAT allows A's response. This works for ALL Symmetric NAT types — sequential, random, doesn't matter — because the Symmetric NAT's own rule (allow responses from the destination you sent to) is what makes it work.
 
-> **This means: for the ~45% of connections where at least one side has IPv6, the relay problem does not exist. Full stop.**
+> **This means: for the ~72% of connections where at least one side has IPv6, the relay problem does not exist. Full stop.**
 
 ---
 
 ## 2.4 Combined Coverage
 
-- Both IPv6: ~10% of connections → direct P2P
-- One IPv6, one IPv4 (any NAT type): ~35% of connections → direct P2P
-- **Total from IPv6 alone: ~45% of connections are direct P2P**
+- Both IPv6: ~22% of connections → direct P2P
+- One IPv6, one IPv4 (any NAT type): ~50% of connections → direct P2P
+- **Total from IPv6 alone: ~72% of connections are direct P2P** (Source: Google IPv6 Statistics, Q1 2025)
 
 ---
 
@@ -91,6 +91,6 @@ Devices using temporary IPv6 addresses (RFC 4941) must register their current te
 
 ## 2.7 Performance Claims with Evidence
 
-**Claim: IPv6 eliminates NAT for ~45% of connections globally.**
-- Evidence: ~45% IPv6 adoption (Google IPv6 Stats, Q1 2025). P(at least one side IPv6) = 1 - 0.55² = ~70%. However, not all IPv6 connections succeed due to firewalls and broken IPv6 paths. Conservative effective coverage: ~45% of all connections have at least one working IPv6 endpoint.
+**Claim: IPv6 eliminates NAT for ~72% of connections globally.**
+- Evidence: ~47% IPv6 adoption (Google IPv6 Statistics, Q1 2025). P(at least one side IPv6) = 1 − 0.53² ≈ 72%. This is the theoretical maximum — some IPv6 connections may fail due to firewalls or broken IPv6 paths, but no empirical study measures this failure rate.
 - When at least one side has IPv6, the IPv6 endpoint is directly reachable. The IPv4 side's Symmetric NAT allows responses from the IPv6 destination. This works for ALL NAT types on the IPv4 side.

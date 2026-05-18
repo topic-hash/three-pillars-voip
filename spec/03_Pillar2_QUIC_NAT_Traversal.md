@@ -7,10 +7,10 @@
 
 ## 3.1 The Problem
 
-For the ~55% of connections where both endpoints are IPv4-only, the NAT traversal problem remains:
+For the ~28% of connections where both endpoints are IPv4-only, the NAT traversal problem remains:
 
-- **Cone NAT (~60% of IPv4 NATs):** The external address is destination-independent. QUIC simultaneous open (PATH_CHALLENGE) works trivially. Not a problem.
-- **Symmetric NAT (~40% of IPv4 NATs):** The external address is different for each destination. The address observed by one path is wrong when talking to the peer. This is the hard problem that port prediction solves.
+- **Cone NAT (~65-75% of IPv4 NATs):** The external address is destination-independent. QUIC simultaneous open (PATH_CHALLENGE) works trivially. Not a problem. (Sources: D'Acunto et al. 2009; Halkes & Pouwelse 2011)
+- **Symmetric NAT (~11-16% of IPv4 NATs):** The external address is different for each destination. The address observed by one path is wrong when talking to the peer. This is the hard problem that port prediction solves. (Sources: D'Acunto et al. 2009; Halkes & Pouwelse 2011)
 
 **This entire pillar uses QUIC-native mechanisms. There is no STUN protocol. There is no ICE. There is no separate UDP protocol for NAT observation.** The signaling server's QUIC endpoint with 5 elastic IPs serves as the probing target, and QUIC PATH_CHALLENGE/PATH_RESPONSE serves as both the probing mechanism and the hole-punching mechanism.
 
@@ -55,14 +55,14 @@ This is **observation of your own NAT's behavior**, not probing someone else's n
 
 ## 3.4 How Common Is Sequential Allocation?
 
-| NAT Type | Allocation Pattern | % of Symmetric NATs | Port Prediction Works? |
-|----------|--------------------|---------------------|------------------------|
-| Home router (consumer) | Sequential (+1 or +2 per mapping) | ~50% | **YES** |
-| CGNAT (ISP-level) | Pseudo-sequential (within a range, +1 to +5) | ~25% | **YES** (with wider margin) |
-| Enterprise firewall | Random | ~15% | **NO** |
-| Strict CGNAT | Random with small port range | ~10% | **NO** |
+| NAT Type | Allocation Pattern | Port Prediction Works? |
+|----------|--------------------|------------------------|
+| Home router (consumer) | Sequential (+1 or +2 per mapping) | **YES** |
+| CGNAT (ISP-level) | Pseudo-sequential (within a range, +1 to +5) | **YES** (with wider margin) |
+| Enterprise firewall | Random | **NO** |
+| Strict CGNAT | Random with small port range | **NO** |
 
-**Estimated: ~60% of Symmetric NATs have predictable allocation.** Port prediction works for these. The remaining ~40% (random allocation) are the cases where the call will fail without relay — an honest limitation.
+**No empirical study measures what percentage of Symmetric NATs use predictable vs. random port allocation.** Previous versions of this specification claimed "~60% predictable," but this figure had no empirical basis. Some Symmetric NATs use sequential allocation (predictable), others use random allocation (unpredictable), but the proportion is unknown. Port prediction should be attempted when the 5-probe analysis shows a sequential or pseudo-sequential pattern, and should not be attempted when the analysis shows random allocation.
 
 ---
 
@@ -214,9 +214,9 @@ This is NOT a relay. The retry still uses direct P2P. The push notification just
 
 ## 3.10 Performance Claims with Evidence
 
-**Claim: Port prediction works for ~60% of Symmetric NATs.**
-- Evidence: Tailscale uses port prediction in production (documented in engineering blog). Ford et al. (IETF RFC 5128, 2008) document NAT port allocation behavior — most consumer NAT implementations use sequential allocation. The 60% estimate is conservative, including pseudo-sequential CGNAT.
-- For the ~40% of Symmetric NATs with random allocation, prediction fails honestly. Push notification retry gives a second chance without relay.
+**Claim: Port prediction works for Symmetric NATs with sequential or pseudo-sequential allocation.**
+- Evidence: Tailscale uses port prediction in production (documented in engineering blog). Ford et al. (IETF RFC 5128, 2008) document NAT port allocation behavior — many consumer NAT implementations use sequential allocation. Klinec & Matyáš (2014) demonstrated prediction algorithms that work for predictable NATs.
+- **No empirical data exists on what percentage of Symmetric NATs have predictable vs. random allocation.** For Symmetric NATs with random allocation, prediction fails honestly. Push notification retry gives a second chance without relay.
 
 **Claim: QUIC-native probing replaces STUN with no loss of functionality.**
 - Evidence: QUIC PATH_CHALLENGE/PATH_RESPONSE (RFC 9000 §9) provides the same address-reflection capability as STUN Binding. The signaling server sees the client's source IP:port on each path migration, identical to what a STUN server would observe. The NAT classification algorithm is the same regardless of whether the probe comes from STUN or QUIC.

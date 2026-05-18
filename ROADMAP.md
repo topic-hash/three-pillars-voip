@@ -11,7 +11,7 @@
 
 The baseline. QUIC-native NAT traversal, MASQUE relay fallback, DHT discovery, MoQ media. All in Rust.
 
-Fallback chain: IPv6 → QUIC Simultaneous Open (Cone NAT) → QUIC Port Prediction (Symmetric NAT) → MASQUE over HTTP/3 (UDP available) → MASQUE over HTTP/2 (UDP blocked) → Push Retry (~1%)
+Fallback chain: IPv6 (~72% direct) → QUIC Simultaneous Open (Cone NAT, ~26%) → QUIC Port Prediction (Symmetric NAT, ~0.5%) → MASQUE over HTTP/3 (UDP available) → MASQUE over HTTP/2 (UDP blocked, ~2-4%) → Push Retry (~1%)
 
 ### Phase 1: Core Types & DHT
 
