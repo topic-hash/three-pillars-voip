@@ -28,31 +28,8 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::error::MasqueError;
 
-/// The MASQUE transport type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MasqueTransport {
-    /// QUIC/UDP — preferred when UDP is available
-    Http3,
-    /// TCP — fallback when UDP is blocked
-    Http2,
-}
-
-/// State of a MASQUE tunnel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TunnelState {
-    /// No tunnel needed (direct P2P established)
-    NotNeeded,
-    /// MASQUE tunnel being established
-    Connecting,
-    /// MASQUE relay active (HTTP/3)
-    Active,
-    /// MASQUE relay active (HTTP/2, UDP blocked)
-    ActiveHttp2,
-    /// Proxy disconnected, attempting re-discovery and reconnection
-    Recovering,
-    /// MASQUE failed on both transports, falling back to push retry
-    Failed,
-}
+// Re-export MASQUE types from voip-core for spec compliance.
+pub use voip_core::{MasqueTransport, TunnelStatus as TunnelState};
 
 /// A MASQUE CONNECT-UDP tunnel.
 ///
@@ -412,6 +389,14 @@ impl MasqueTunnel {
 /// Uses Extended CONNECT (RFC 8441) with the `connect-udp` protocol.
 /// The `:protocol` pseudo-header is set via the h3 extended connect API.
 fn build_connect_udp_request(host: &str, port: u16, call_id: &str) -> Result<http::Request<()>, MasqueError> {
+    build_connect_udp_request_with_peer(host, port, call_id, "")
+}
+
+/// Build the CONNECT-UDP request headers per spec/12 §12.2.2 with optional peer ID.
+///
+/// Uses Extended CONNECT (RFC 8441) with the `connect-udp` protocol.
+/// The `:protocol` pseudo-header is set via the h3 extended connect API.
+fn build_connect_udp_request_with_peer(host: &str, port: u16, call_id: &str, peer_id: &str) -> Result<http::Request<()>, MasqueError> {
     let authority = format!("{}:{}", host, port);
 
     // Use the http::request::Builder API which properly handles pseudo-headers
@@ -425,6 +410,11 @@ fn build_connect_udp_request(host: &str, port: u16, call_id: &str) -> Result<htt
         .header("connect-udp-target-host", "voip-relay")
         .header("connect-udp-target-port", "0")
         .header("x-voip-call-id", call_id);
+
+    // Per spec/12 §12.2.2: x-voip-peer-id header is required for proxy matching
+    if !peer_id.is_empty() {
+        builder = builder.header("x-voip-peer-id", peer_id);
+    }
 
     // For Extended CONNECT, the :protocol pseudo-header is set via
     // the h3 protocol-specific mechanism. In h3 0.0.8, this is
@@ -597,10 +587,20 @@ pub async fn establish_masque_tunnel(
 
 /// Detect whether MASQUE relay is needed based on both peers' NAT types.
 ///
-/// Per spec/06 §6.6 Step 7: MASQUE is needed when:
-/// - Both peers are behind SymmetricRandom NAT, or
-/// - UDP is blocked entirely, or
+/// Per spec/09 §9.9: The connection fallback chain is:
+/// 1. IPv6 Direct → 2. QUIC Simultaneous Open (Cone) →
+/// 3. Port Prediction (Symmetric sequential/pseudo) →
+/// 4. MASQUE/HTTP3 → 5. MASQUE/HTTP2 → 6. Push Retry
+///
+/// MASQUE is needed when all direct methods have been exhausted:
+/// - Both peers behind SymmetricRandom NAT (neither can predict)
+/// - UDP is blocked entirely
+/// - One random + one symmetric (prediction from symmetric side fails)
 /// - IPv6 firewalls block both sides
+///
+/// Note: When one side is Random and the other is predictable (Sequential/Pseudo),
+/// one-side prediction is attempted first (spec/01 §1.4: ~60% success rate).
+/// MASQUE is the fallback when one-side prediction also fails.
 pub fn detect_masque_need(
     local_nat_type: voip_core::NATType,
     peer_nat_type: voip_core::NATType,
@@ -610,23 +610,36 @@ pub fn detect_masque_need(
         return true;
     }
 
-    // Both random NAT → need MASQUE
+    // Both random NAT → no prediction possible, need MASQUE
     if local_nat_type == voip_core::NATType::SymmetricRandom
         && peer_nat_type == voip_core::NATType::SymmetricRandom
     {
         return true;
     }
 
-    // At least one random with the other not Cone → MASQUE helps
-    if (local_nat_type == voip_core::NATType::SymmetricRandom
-        || peer_nat_type == voip_core::NATType::SymmetricRandom)
-        && local_nat_type != voip_core::NATType::Cone
-        && peer_nat_type != voip_core::NATType::Cone
+    // One side IPv6 (None) is always reachable, no MASQUE needed
+    if local_nat_type == voip_core::NATType::None
+        || peer_nat_type == voip_core::NATType::None
     {
-        return true;
+        return false;
     }
 
-    false
+    // One side Cone → QUIC simultaneous open works, no MASQUE needed
+    if local_nat_type == voip_core::NATType::Cone
+        || peer_nat_type == voip_core::NATType::Cone
+    {
+        return false;
+    }
+
+    // One side predictable (Sequential/Pseudo) → one-side prediction attempted first
+    // MASQUE is fallback only if prediction also fails
+    // This function returns false to indicate "try prediction first, then MASQUE if it fails"
+    if local_nat_type.is_predictable() || peer_nat_type.is_predictable() {
+        return false;
+    }
+
+    // Both are random and neither is Cone/IPv6 → MASQUE needed
+    true
 }
 
 #[cfg(test)]

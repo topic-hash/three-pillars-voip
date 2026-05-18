@@ -39,8 +39,9 @@ pub mod tls;
 pub use voip_core::config::VoIPConfig;
 pub use voip_core::types::{
     NATInfo, NATType, CallEndReason, CallState, ConnectionMethod, DiscoveryMethod,
-    MediaType, PeerStatus, PortPredictionData, PredictionConfidence, ProbeMethod,
-    TrackInfo,
+    MasqueTransport, MediaType, NATProbingState, PeerStatus, PortPredictionData,
+    PredictionConfidence, ProbeMethod, ProxyLifecycleState, PushRetryState,
+    TrackInfo, TunnelStatus,
 };
 pub use voip_core::error::VoipError;
 pub use voip_core::state::CallStateMachine;

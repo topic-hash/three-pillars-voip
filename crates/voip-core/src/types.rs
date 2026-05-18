@@ -740,3 +740,168 @@ impl NATInfo {
         )
     }
 }
+
+// ============================================================================
+// TunnelStatus (spec/08 §8.10, spec/12 §12.8)
+// ============================================================================
+
+/// Status of a MASQUE tunnel.
+///
+/// Per spec/12 §12.8: The MASQUE tunnel lifecycle state machine.
+///
+/// ```text
+/// IDLE → DISCOVERING → CONNECTING → TUNNELING
+///   ↓ (proxy disconnect) → RECOVERING → CONNECTING
+///   ↓ (no more proxies) → FAILED → Push retry
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TunnelStatus {
+    /// No tunnel needed (direct P2P established)
+    NotNeeded,
+    /// MASQUE tunnel being established
+    Connecting,
+    /// MASQUE relay active over HTTP/3 (QUIC/UDP)
+    Active,
+    /// MASQUE relay active over HTTP/2 (TCP, UDP blocked)
+    ActiveHttp2,
+    /// Proxy disconnected, attempting re-discovery and reconnection
+    Recovering,
+    /// MASQUE failed on both transports, falling back to push retry
+    Failed,
+}
+
+impl TunnelStatus {
+    /// Returns true if the tunnel is actively relaying data.
+    pub fn is_active(&self) -> bool {
+        matches!(self, TunnelStatus::Active | TunnelStatus::ActiveHttp2)
+    }
+
+    /// Returns true if this represents a terminal failure state.
+    pub fn is_failed(&self) -> bool {
+        matches!(self, TunnelStatus::Failed)
+    }
+}
+
+// ============================================================================
+// MasqueTransport (spec/12 §12.2, §12.6)
+// ============================================================================
+
+/// MASQUE transport type.
+///
+/// Per spec/12 §12.6: The proxy accepts both HTTP/3 (QUIC) and HTTP/2 (TCP)
+/// on port 443. If UDP is available, HTTP/3 is preferred (lower latency,
+/// no HOL blocking). If UDP is blocked, HTTP/2 is used as fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MasqueTransport {
+    /// QUIC/UDP — preferred when UDP is available (1 RTT setup)
+    Http3,
+    /// TCP — fallback when UDP is blocked (2 RTT setup for TCP+TLS)
+    Http2,
+}
+
+// ============================================================================
+// NATProbingState (spec/07 §7.3.2)
+// ============================================================================
+
+/// State machine for NAT probing.
+///
+/// Per spec/07 §7.3.2:
+/// ```text
+/// IDLE → PROBING → ANALYZING → CACHED
+///          ↑                      ↓ (TTL expired / Network change)
+///          └─── REFRESHING ←─────┘
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NATProbingState {
+    /// No probing done yet.
+    Idle,
+    /// Currently probing server IPs via QUIC path migration.
+    Probing,
+    /// Analyzing probe results to classify NAT type.
+    Analyzing,
+    /// Results cached and valid (within TTL).
+    Cached,
+    /// Cache expired or network changed, refreshing probes.
+    Refreshing,
+}
+
+// ============================================================================
+// PushRetryState (spec/07 §7.3.4)
+// ============================================================================
+
+/// State machine for push retry.
+///
+/// Per spec/07 §7.3.4:
+/// ```text
+/// IDLE → PUSHING → WAITING → (success → CONNECTED)
+///                              (fail + attempts < 3 → PUSHING)
+///                              (fail + attempts >= 3 → PERMANENTLY_FAILED)
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PushRetryState {
+    /// No retry in progress.
+    Idle,
+    /// Push notification being sent.
+    Pushing,
+    /// Waiting for peer to respond (with exponential backoff).
+    Waiting,
+    /// Connection established after retry.
+    Connected,
+    /// All retry attempts exhausted (max 3).
+    PermanentlyFailed,
+}
+
+// ============================================================================
+// ProxyLifecycleState (spec/12 §12.9)
+// ============================================================================
+
+/// State machine for the volunteer MASQUE proxy lifecycle.
+///
+/// Per spec/12 §12.9:
+/// ```text
+/// OFF → (user enables) → STARTING → (ready) → SERVING
+///  ↑                                         ↓ (user disables / app closes)
+///  └────────────── SHUTTING ←────────────────┘
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProxyLifecycleState {
+    /// Proxy not running.
+    Off,
+    /// Proxy is initializing (binding ports, getting TLS cert).
+    Starting,
+    /// Proxy is accepting relay sessions.
+    Serving,
+    /// Proxy is shutting down (draining active sessions).
+    Shutting,
+}
+
+// ============================================================================
+// MASQUE Anti-Abuse Constants (spec/12 §12.7)
+// ============================================================================
+
+/// Anti-abuse limits for the MASQUE proxy.
+///
+/// Per spec/12 §12.7: These limits prevent abuse of volunteer proxy nodes.
+pub mod masque_limits {
+    /// Maximum concurrent relay sessions per proxy (default: 10).
+    pub const MAX_SESSIONS: u32 = 10;
+    /// Maximum session duration in seconds (4 hours).
+    pub const MAX_SESSION_DURATION_SECS: u64 = 4 * 3600;
+    /// Maximum datagrams per second per session.
+    pub const MAX_DATAGRAMS_PER_SEC: u32 = 200;
+    /// Maximum datagram size in bytes.
+    pub const MAX_DATAGRAM_SIZE: usize = 1280;
+    /// Only allow target UDP ports in this range.
+    pub const MIN_TARGET_PORT: u16 = 1024;
+    pub const MAX_TARGET_PORT: u16 = 65535;
+    /// Maximum bandwidth per session in bits per second (500 Kbps).
+    pub const MAX_BANDWIDTH_BPS: u32 = 500_000;
+    /// ProxyToken validity duration in seconds (default: 60).
+    pub const PROXY_TOKEN_TTL_SECS: u32 = 60;
+}
+
+/// Effective MoQ payload MTU through MASQUE tunnel.
+///
+/// Per spec/12 §12.5: 1280 (path MTU) - 48 (QUIC/UDP/IP) - 12 (MASQUE) ≈ 1220 bytes.
+/// Opus audio: 80-120 bytes — no fragmentation needed.
+pub const MASQUE_EFFECTIVE_MOQ_MTU: usize = 1220;

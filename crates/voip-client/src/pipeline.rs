@@ -18,7 +18,7 @@ use tracing::{info, instrument, warn};
 use voip_core::VoIPConfig;
 
 use crate::audio::{OpusConfig, OpusDecoder, OpusEncoder};
-use crate::error::{AudioError, PipelineError};
+use crate::error::PipelineError;
 use crate::moq::{MoqDatagram, priority};
 
 // =============================================================================

@@ -59,7 +59,8 @@ pub struct MasqueProxy {
     sessions: HashMap<String, RelaySession>,
     /// Anti-abuse limits.
     limits: ProxyLimits,
-    /// ProxyToken verifier.
+    /// ProxyToken verifier (used during CONNECT-UDP request validation).
+    #[allow(dead_code)] // Used in full proxy implementation during accept_quic_connection
     token_verifier: TokenVerifier,
 }
 
@@ -310,24 +311,24 @@ impl MasqueProxy {
 
 /// Anti-abuse limits for the MASQUE proxy per the spec.
 ///
-/// Per spec/12 §12.3:
+/// Per spec/12 §12.7:
 /// - capacity: 10 concurrent sessions
 /// - duration: 4 hours max per session
-/// - datagram rate: 500/s per session
-/// - datagram size: 1200 bytes max
-/// - bandwidth: 1 Mbps per session
-/// - target port: only allowed ports (no port 25, etc.)
+/// - datagram rate: 200/s per session
+/// - datagram size: 1280 bytes max
+/// - bandwidth: 500 Kbps per session
+/// - target port: UDP 1024-65535 only
 #[derive(Debug, Clone)]
 pub struct ProxyLimits {
     /// Maximum number of concurrent relay sessions (default: 10).
     pub max_sessions: u32,
     /// Maximum session duration in seconds (default: 14400 = 4h).
     pub max_duration_secs: u64,
-    /// Maximum datagrams per second per session (default: 500).
+    /// Maximum datagrams per second per session (default: 200).
     pub max_datagram_rate: u32,
-    /// Maximum datagram size in bytes (default: 1200).
+    /// Maximum datagram size in bytes (default: 1280).
     pub max_datagram_size: usize,
-    /// Maximum bandwidth in bits per second per session (default: 1_000_000).
+    /// Maximum bandwidth in bits per second per session (default: 500_000 = 500 Kbps).
     pub max_bandwidth_bps: u64,
     /// Blocked target ports (default: 25 SMTP, 194 IRC, etc.).
     pub blocked_target_ports: Vec<u16>,
@@ -336,11 +337,11 @@ pub struct ProxyLimits {
 impl Default for ProxyLimits {
     fn default() -> Self {
         Self {
-            max_sessions: 10,
-            max_duration_secs: 14_400, // 4 hours
-            max_datagram_rate: 500,
-            max_datagram_size: 1200,
-            max_bandwidth_bps: 1_000_000, // 1 Mbps
+            max_sessions: voip_core::masque_limits::MAX_SESSIONS,
+            max_duration_secs: voip_core::masque_limits::MAX_SESSION_DURATION_SECS,
+            max_datagram_rate: voip_core::masque_limits::MAX_DATAGRAMS_PER_SEC,
+            max_datagram_size: voip_core::masque_limits::MAX_DATAGRAM_SIZE,
+            max_bandwidth_bps: voip_core::masque_limits::MAX_BANDWIDTH_BPS as u64,
             blocked_target_ports: vec![
                 25,   // SMTP
                 194,  // IRC
@@ -1243,9 +1244,9 @@ mod tests {
         let limits = ProxyLimits::default();
         assert_eq!(limits.max_sessions, 10);
         assert_eq!(limits.max_duration_secs, 14_400);
-        assert_eq!(limits.max_datagram_rate, 500);
-        assert_eq!(limits.max_datagram_size, 1200);
-        assert_eq!(limits.max_bandwidth_bps, 1_000_000);
+        assert_eq!(limits.max_datagram_rate, 200); // spec/12 §12.7
+        assert_eq!(limits.max_datagram_size, 1280); // spec/12 §12.7
+        assert_eq!(limits.max_bandwidth_bps, 500_000); // spec/12 §12.7: 500 Kbps
         assert!(limits.blocked_target_ports.contains(&25)); // SMTP
     }
 
