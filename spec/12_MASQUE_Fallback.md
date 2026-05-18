@@ -1,6 +1,6 @@
 # 12. MASQUE CONNECT-UDP Fallback
 
-> Part of: Three Pillars VoIP Relay-Free Architecture Specification (TS-2025-001 v8.0)
+> Part of: Three Pillars VoIP Minimal-Relay Architecture Specification (TS-2025-001 v8.0)
 > See also: [Architecture Overview](01_Architecture_Overview.md) | [Discovery & Signaling](06_Discovery_Signaling.md) | [Data Flows](09_Data_Flows.md) | [Implementation Stack](11_Implementation_Stack.md)
 
 ---

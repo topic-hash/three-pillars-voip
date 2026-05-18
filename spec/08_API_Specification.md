@@ -1,6 +1,6 @@
 # 8. API Specification
 
-> Part of: Three Pillars VoIP Relay-Free Architecture Specification (TS-2025-001 v8.0)
+> Part of: Three Pillars VoIP Minimal-Relay Architecture Specification (TS-2025-001 v8.0)
 
 ---
 

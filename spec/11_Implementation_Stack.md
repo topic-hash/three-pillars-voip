@@ -1,6 +1,6 @@
 # 11. Implementation Stack
 
-> Part of: Three Pillars VoIP Relay-Free Architecture Specification (TS-2025-001 v8.0)  
+> Part of: Three Pillars VoIP Minimal-Relay Architecture Specification (TS-2025-001 v8.0)  
 > See also: [Architecture Overview](01_Architecture_Overview.md) | [Pillar 3: QUIC](04_Pillar3_QUIC.md) | [API Specification](08_API_Specification.md)
 
 ---

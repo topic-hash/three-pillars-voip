@@ -1,4 +1,4 @@
-//! voip-client: Client library for the Three Pillars VoIP Relay-Free Architecture.
+//! voip-client: Client library for the Three Pillars VoIP Minimal-Relay Architecture.
 //!
 //! This crate handles:
 //! - QUIC connections (quinn-based) with connection migration support

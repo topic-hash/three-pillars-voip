@@ -1,6 +1,6 @@
 # 7. Data Model
 
-> Part of: Three Pillars VoIP Relay-Free Architecture Specification (TS-2025-001 v8.0)  
+> Part of: Three Pillars VoIP Minimal-Relay Architecture Specification (TS-2025-001 v8.0)  
 > See also: [Discovery & Signaling](06_Discovery_Signaling.md) | [API Specification](08_API_Specification.md) | [Data Persistence](10_Data_Persistence.md)
 
 ---

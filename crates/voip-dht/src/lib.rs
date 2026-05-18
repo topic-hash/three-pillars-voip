@@ -1,7 +1,7 @@
 //! # voip-dht
 //!
 //! Distributed Hash Table node using libp2p KadDHT for the
-//! Three Pillars VoIP Relay-Free Architecture.
+//! Three Pillars VoIP Minimal-Relay Architecture.
 //!
 //! This crate implements the DHT discovery layer described in
 //! spec/06_Discovery_Signaling.md §6.2:

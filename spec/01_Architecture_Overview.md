@@ -60,7 +60,7 @@ This architecture adopts MoQ from day one — no phased migration, no intermedia
 
 ## 1.5 Combined Coverage Analysis
 
-| Scenario | % of Connections | Mechanism | Relay-Free? |
+| Scenario | % of Connections | Mechanism | Direct P2P? |
 |----------|-----------------|-----------|-------------|
 | Both IPv6 | ~10% | Direct QUIC to IPv6 address | **YES** |
 | One IPv6, one IPv4 (any NAT) | ~35% | IPv4 side sends first, IPv6 responds, Symmetric NAT allows | **YES** |

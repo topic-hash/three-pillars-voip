@@ -1,6 +1,6 @@
 # 3. Pillar 2: QUIC-Native NAT Traversal — Cone NAT + Port Prediction
 
-> Part of: Three Pillars VoIP Relay-Free Architecture Specification (TS-2025-001 v8.0)  
+> Part of: Three Pillars VoIP Minimal-Relay Architecture Specification (TS-2025-001 v8.0)  
 > See also: [Architecture Overview](01_Architecture_Overview.md) | [Data Flows: NAT Traversal](09_Data_Flows.md) | [API: QUIC Connection Management](08_API_Specification.md)
 
 ---

@@ -1,6 +1,6 @@
 # 2. Pillar 1: IPv6 — NAT Elimination
 
-> Part of: Three Pillars VoIP Relay-Free Architecture Specification (TS-2025-001 v8.0)  
+> Part of: Three Pillars VoIP Minimal-Relay Architecture Specification (TS-2025-001 v8.0)  
 > See also: [Architecture Overview](01_Architecture_Overview.md) | [Data Flows: IPv6 Direct](09_Data_Flows.md)
 
 ---
@@ -64,9 +64,9 @@ The key: A's IPv6 address is the DESTINATION of B's outbound packet, so B's Symm
 
 ## 2.4 Combined Coverage
 
-- Both IPv6: ~10% of connections → relay-free
-- One IPv6, one IPv4 (any NAT type): ~35% of connections → relay-free
-- **Total from IPv6 alone: ~45% of connections are relay-free**
+- Both IPv6: ~10% of connections → direct P2P
+- One IPv6, one IPv4 (any NAT type): ~35% of connections → direct P2P
+- **Total from IPv6 alone: ~45% of connections are direct P2P**
 
 ---
 

@@ -1,6 +1,6 @@
 # 4. Pillar 3: QUIC — The Single Protocol That Replaces Everything
 
-> Part of: Three Pillars VoIP Relay-Free Architecture Specification (TS-2025-001 v8.0)  
+> Part of: Three Pillars VoIP Minimal-Relay Architecture Specification (TS-2025-001 v8.0)  
 > See also: [Architecture Overview](01_Architecture_Overview.md) | [Media Layer: MoQ](05_Media_Layer_MoQ.md) | [API: QUIC Connection Management](08_API_Specification.md)
 
 ---

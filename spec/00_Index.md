@@ -1,4 +1,4 @@
-# Three Pillars VoIP Relay-Free Architecture — Specification Index
+# Three Pillars VoIP Minimal-Relay Architecture — Specification Index
 
 > **Document ID:** TS-2025-001  
 > **Version:** v8.0  
@@ -25,7 +25,7 @@ Direct P2P first. MASQUE relay as automatic seamless fallback when direct fails.
 | # | File | Domain | Description |
 |---|------|--------|-------------|
 | 01 | [Architecture Overview](01_Architecture_Overview.md) | Architecture | Core principle, three pillars + MASQUE fallback summary, MoQ as media layer, coverage analysis, growth trajectory, discovery architecture |
-| 02 | [Pillar 1: IPv6](02_Pillar1_IPv6.md) | Network / IPv6 | NAT elimination via IPv6, deployment data, relay-free mechanism, implementation steps |
+| 02 | [Pillar 1: IPv6](02_Pillar1_IPv6.md) | Network / IPv6 | NAT elimination via IPv6, deployment data, direct P2P mechanism, implementation steps |
 | 03 | [Pillar 2: QUIC-Native NAT Traversal](03_Pillar2_QUIC_NAT_Traversal.md) | Network / NAT | Cone NAT simultaneous open via QUIC, Symmetric NAT port prediction via QUIC path probing, 5-step algorithm, accuracy analysis, legal analysis |
 | 04 | [Pillar 3: QUIC](04_Pillar3_QUIC.md) | Transport | Single protocol replacement, 8-to-1 mapping, Connection ID enabler, connection migration, 1-RTT setup, datagram reliability, QUIC hole punching |
 | 05 | [Media Layer: MoQ](05_Media_Layer_MoQ.md) | Media | MoQ rationale, spec status, architecture fit, connection flow integration |
@@ -71,5 +71,5 @@ Direct P2P first. MASQUE relay as automatic seamless fallback when direct fails.
 | Version | Date | Change |
 |---------|------|--------|
 | v8.0 | 2025-05-17 | Added MASQUE CONNECT-UDP (RFC 9298) as automatic seamless fallback when all Three Pillars fail. ~91% direct P2P + ~8% MASQUE relay = ~99% connected rate. DHT proxy discovery for MASQUE proxy nodes. Traffic indistinguishable from HTTPS — censorship-resistant relay. Principle shift from "zero relay" to "direct first, MASQUE automatic fallback." No user opt-in required. |
-| v7.0 | 2025-05-17 | Major revision: eliminated STUN protocol entirely, replaced with QUIC-native path probing and hole punching. Added DHT discovery layer (libp2p KadDHT) with user toggle. Corrected IPv6 coverage to ~45% (sourced from Google stats). Corrected total relay-free rate to ~91%. Added push notification retry for 9% failure. Signaling server deployment on Oracle Free + Cloudflare Free. |
+| v7.0 | 2025-05-17 | Major revision: eliminated STUN protocol entirely, replaced with QUIC-native path probing and hole punching. Added DHT discovery layer (libp2p KadDHT) with user toggle. Corrected IPv6 coverage to ~45% (sourced from Google stats). Corrected total direct P2P rate to ~91%. Added push notification retry for 9% failure. Signaling server deployment on Oracle Free + Cloudflare Free. |
 | v6.0 | 2025-05-14 | Initial specification. Single-phase Three Pillars + MoQ architecture. Domain-split into 11 files. |
