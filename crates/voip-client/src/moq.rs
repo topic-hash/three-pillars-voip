@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use quinn::{Connection, RecvStream, SendStream};
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 use voip_core::VoIPConfig;
 
@@ -532,6 +532,7 @@ pub struct MoqSession {
 
 /// An active track subscription.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct TrackSubscription {
     subscribe_id: u64,
     namespace: TrackNamespace,

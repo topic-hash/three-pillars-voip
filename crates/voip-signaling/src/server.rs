@@ -8,14 +8,67 @@ use axum::Router;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use tower_http::cors::CorsLayer;
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 use voip_core::VoIPConfig;
 
+use crate::error::ErrorResponse;
 use crate::handlers;
+use crate::handlers::{
+    DhtBootstrapResponse, LookupResponse, MyIpResponse, PeerResponse,
+    PeerStatusResponse, ProxyEntryResponse, ProxyResponse, ProxyTokenRequest, ProxyTokenResponse,
+    RegisterPeerRequest, RegisterPeerResponse,
+};
 use crate::rate_limit::RateLimitConfig;
 use crate::state::AppState;
 
 /// Default HTTP listen port for the signaling server.
 const DEFAULT_PORT: u16 = 8443;
+
+// ── OpenAPI specification ────────────────────────────────────────────────
+
+/// OpenAPI specification for the signaling server REST API.
+///
+/// Includes all REST endpoints with request/response schemas.
+/// The spec is served at `/v1/openapi.json` and the Swagger UI at `/swagger-ui/`.
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        handlers::register_peer,
+        handlers::update_peer,
+        handlers::unregister_peer,
+        handlers::get_peer,
+        handlers::get_peer_status,
+        handlers::lookup_peer,
+        handlers::get_my_ip,
+        handlers::get_proxies,
+        handlers::dht_bootstrap,
+        handlers::issue_proxy_token,
+    ),
+    components(
+        schemas(
+            RegisterPeerRequest,
+            RegisterPeerResponse,
+            PeerResponse,
+            PeerStatusResponse,
+            LookupResponse,
+            MyIpResponse,
+            ProxyResponse,
+            ProxyEntryResponse,
+            ProxyTokenRequest,
+            ProxyTokenResponse,
+            DhtBootstrapResponse,
+            ErrorResponse,
+        )
+    ),
+    tags(
+        (name = "Peers", description = "Peer registration and lookup"),
+        (name = "Network", description = "Network information endpoints"),
+        (name = "MASQUE", description = "MASQUE proxy and relay endpoints"),
+        (name = "DHT", description = "Distributed Hash Table bootstrap"),
+    )
+)]
+pub struct ApiDoc;
 
 /// Signaling server configuration.
 #[derive(Debug, Clone)]
@@ -151,8 +204,11 @@ impl SignalingServer {
             .route("/v1/proxy-token", post(handlers::issue_proxy_token))
             // ── WebSocket ─────────────────────────────────────────
             .route("/v1/ws", get(handlers::ws_upgrade))
-            // ── Shared state & middleware ──────────────────────────
+            // ── Shared state ──────────────────────────────────────
             .with_state(self.state.clone())
+            // ── OpenAPI / Swagger UI ──────────────────────────────
+            .merge(SwaggerUi::new("/swagger-ui").url("/v1/openapi.json", ApiDoc::openapi()))
+            // ── CORS ──────────────────────────────────────────────
             .layer(CorsLayer::permissive())
     }
 

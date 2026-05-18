@@ -38,7 +38,7 @@ pub mod codes {
 
 // ── JSON error response body for REST endpoints ─────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ErrorResponse {
     pub code: u32,
     pub message: String,

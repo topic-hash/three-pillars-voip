@@ -23,14 +23,14 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use tracing::{debug, info, warn};
 
-use crate::error::SignalingError;
+use crate::error::{ErrorResponse, SignalingError};
 use crate::jwt;
 use crate::session;
 use crate::state::{AppState, PeerInfo};
 
 // ── JSON request / response types ──────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PeerResponse {
     pub peer_id: String,
     pub display_name: String,
@@ -41,7 +41,7 @@ pub struct PeerResponse {
     pub last_seen: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RegisterPeerRequest {
     pub peer_id: String,
     pub display_name: String,
@@ -55,7 +55,7 @@ pub struct RegisterPeerRequest {
     pub fcm_token: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct MyIpResponse {
     pub ip: String,
     pub ip_version: u8,
@@ -63,12 +63,12 @@ pub struct MyIpResponse {
     pub observed_at: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ProxyResponse {
     pub proxies: Vec<ProxyEntryResponse>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ProxyEntryResponse {
     pub node_id: String,
     pub proxy_url: String,
@@ -77,47 +77,47 @@ pub struct ProxyEntryResponse {
     pub latency_hint_ms: u32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ProxyTokenRequest {
     pub peer_id: String,
     pub target_peer_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ProxyTokenResponse {
     pub token: String,
     pub ttl_seconds: u32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::IntoParams)]
 pub struct LookupQuery {
     pub username: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct LookupResponse {
     pub peer_id: String,
     pub display_name: String,
     pub status: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PeerStatusResponse {
     pub peer_id: String,
     pub status: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct DhtBootstrapResponse {
     pub nodes: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::IntoParams)]
 pub struct JwtTokenQuery {
     pub token: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RegisterPeerResponse {
     pub peer_id: String,
     pub jwt_token: String,
@@ -151,6 +151,17 @@ fn peer_status_str(val: i32) -> String {
 /// `POST /v1/peers` — register a new peer.
 ///
 /// Also issues a JWT token for the peer to use for WebSocket auth.
+#[utoipa::path(
+    post,
+    path = "/v1/peers",
+    request_body = RegisterPeerRequest,
+    responses(
+        (status = 201, description = "Peer registered successfully, JWT token issued", body = RegisterPeerResponse),
+        (status = 429, description = "Rate limited", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+    tag = "Peers"
+)]
 pub async fn register_peer(
     State(state): State<AppState>,
     Json(body): Json<RegisterPeerRequest>,
@@ -213,6 +224,17 @@ pub async fn register_peer(
 }
 
 /// `PUT /v1/peers/{peer_id}` — update peer registration.
+#[utoipa::path(
+    put,
+    path = "/v1/peers/{peer_id}",
+    request_body = RegisterPeerRequest,
+    responses(
+        (status = 200, description = "Peer updated successfully", body = PeerResponse),
+        (status = 404, description = "Peer not found", body = ErrorResponse),
+        (status = 429, description = "Rate limited", body = ErrorResponse),
+    ),
+    tag = "Peers"
+)]
 pub async fn update_peer(
     State(state): State<AppState>,
     Path(peer_id): Path<String>,
@@ -281,6 +303,15 @@ pub async fn update_peer(
 }
 
 /// `DELETE /v1/peers/{peer_id}` — unregister a peer.
+#[utoipa::path(
+    delete,
+    path = "/v1/peers/{peer_id}",
+    responses(
+        (status = 204, description = "Peer unregistered successfully"),
+        (status = 404, description = "Peer not found", body = ErrorResponse),
+    ),
+    tag = "Peers"
+)]
 pub async fn unregister_peer(
     State(state): State<AppState>,
     Path(peer_id): Path<String>,
@@ -291,6 +322,15 @@ pub async fn unregister_peer(
 }
 
 /// `GET /v1/peers/{peer_id}` — peer lookup.
+#[utoipa::path(
+    get,
+    path = "/v1/peers/{peer_id}",
+    responses(
+        (status = 200, description = "Peer information", body = PeerResponse),
+        (status = 404, description = "Peer not found", body = ErrorResponse),
+    ),
+    tag = "Peers"
+)]
 pub async fn get_peer(
     State(state): State<AppState>,
     Path(peer_id): Path<String>,
@@ -312,6 +352,15 @@ pub async fn get_peer(
 }
 
 /// `GET /v1/peers/{peer_id}/status` — peer online status.
+#[utoipa::path(
+    get,
+    path = "/v1/peers/{peer_id}/status",
+    responses(
+        (status = 200, description = "Peer status", body = PeerStatusResponse),
+        (status = 404, description = "Peer not found", body = ErrorResponse),
+    ),
+    tag = "Peers"
+)]
 pub async fn get_peer_status(
     State(state): State<AppState>,
     Path(peer_id): Path<String>,
@@ -328,6 +377,16 @@ pub async fn get_peer_status(
 }
 
 /// `GET /v1/peers/lookup?username={name}` — resolve username to peer_id.
+#[utoipa::path(
+    get,
+    path = "/v1/peers/lookup",
+    params(LookupQuery),
+    responses(
+        (status = 200, description = "Peer found", body = LookupResponse),
+        (status = 404, description = "Peer not found", body = ErrorResponse),
+    ),
+    tag = "Peers"
+)]
 pub async fn lookup_peer(
     State(state): State<AppState>,
     Query(query): Query<LookupQuery>,
@@ -355,6 +414,14 @@ pub async fn lookup_peer(
 ///
 /// Per spec/08 §8.1.3: Returns observed IP, port, IP version, and timestamp.
 /// If the server sees an IPv6 address, the client skips NAT probing entirely.
+#[utoipa::path(
+    get,
+    path = "/v1/myip",
+    responses(
+        (status = 200, description = "Client's observed IP address", body = MyIpResponse),
+    ),
+    tag = "Network"
+)]
 pub async fn get_my_ip(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Json<MyIpResponse> {
@@ -372,6 +439,14 @@ pub async fn get_my_ip(
 ///
 /// Per spec/06 §6.8.3: Returns list of known MASQUE proxy addresses.
 /// Proxies returned by the signaling server are guaranteed reachable.
+#[utoipa::path(
+    get,
+    path = "/v1/proxies",
+    responses(
+        (status = 200, description = "List of MASQUE proxies", body = ProxyResponse),
+    ),
+    tag = "MASQUE"
+)]
 pub async fn get_proxies(
     State(state): State<AppState>,
 ) -> Json<ProxyResponse> {
@@ -394,6 +469,14 @@ pub async fn get_proxies(
 ///
 /// Per spec/06 §6.2.3: Returns active DHT node multiaddresses for bootstrap.
 /// Fallback: hardcoded seed nodes from app binary.
+#[utoipa::path(
+    get,
+    path = "/v1/dht/bootstrap",
+    responses(
+        (status = 200, description = "DHT bootstrap nodes", body = DhtBootstrapResponse),
+    ),
+    tag = "DHT"
+)]
 pub async fn dht_bootstrap(
     State(state): State<AppState>,
 ) -> Json<DhtBootstrapResponse> {
@@ -406,6 +489,16 @@ pub async fn dht_bootstrap(
 /// Per spec/08 §8.1.2 and signaling.proto ProxyToken message:
 /// Signs a ProxyToken with the server's Ed25519 private key.
 /// The token is presented to the MASQUE proxy for anti-abuse verification.
+#[utoipa::path(
+    post,
+    path = "/v1/proxy-token",
+    request_body = ProxyTokenRequest,
+    responses(
+        (status = 200, description = "ProxyToken issued", body = ProxyTokenResponse),
+        (status = 404, description = "Peer not found", body = ErrorResponse),
+    ),
+    tag = "MASQUE"
+)]
 pub async fn issue_proxy_token(
     State(state): State<AppState>,
     Json(body): Json<ProxyTokenRequest>,

@@ -25,3 +25,8 @@ thiserror = { workspace = true }
 quinn = { workspace = true }
 rustls = { workspace = true }
 rcgen = { workspace = true }
+utoipa = "5"
+utoipa-swagger-ui = { version = "8", features = ["axum"] }
+
+[dev-dependencies]
+http-body-util = "0.1"

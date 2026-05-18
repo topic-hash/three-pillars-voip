@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use quinn::Connection;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::error::MasqueError;
 
@@ -121,7 +121,7 @@ impl MasqueTunnel {
             .await
             .map_err(|e| MasqueError::Http3Error(format!("h3 handshake: {}", e)))?;
 
-        let (mut h3_driver, mut send_req) = h3_conn;
+        let (h3_driver, mut send_req) = h3_conn;
 
         // Step 4: Build CONNECT-UDP request headers
         let request = build_connect_udp_request(&host, port, call_id)?;
@@ -216,7 +216,7 @@ impl MasqueTunnel {
 
         // Send the request via HTTP/2 and wait for 200 OK
         // Using the hyper crate for HTTP/2 client support
-        let (mut h2_conn, h2_stream) = perform_h2_handshake(tls_stream, request).await?;
+        let (h2_conn, h2_stream) = perform_h2_handshake(tls_stream, request).await?;
 
         // Step 5: Create a QUIC-like connection through the tunnel
         // For HTTP/2 MASQUE, we create a virtual connection that
@@ -241,8 +241,8 @@ impl MasqueTunnel {
         // For now, we return an error. The loopback QUIC approach
         // will be implemented in the Fine Draft pass.
 
-        drop(h2_conn);
-        drop(h2_stream);
+        let _ = h2_conn;
+        let _ = h2_stream;
 
         Err(MasqueError::Http2Error(
             "HTTP/2 MASQUE tunnel: loopback QUIC not yet implemented".to_string(),

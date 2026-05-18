@@ -20,6 +20,9 @@ mod server;
 mod session;
 mod state;
 
+#[cfg(test)]
+mod tests;
+
 use std::net::SocketAddr;
 
 use server::SignalingServer;
