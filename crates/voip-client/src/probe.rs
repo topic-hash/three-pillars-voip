@@ -25,10 +25,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use quinn::{ClientConfig, Connection, Endpoint};
+use quinn::{Connection, Endpoint};
 use tracing::{debug, info, instrument, warn};
 
-use voip_core::{ConnectError, PortPrediction, PredictionConfidence, ProbeError, VoIPConfig};
+use voip_core::{PortPredictionData, PredictionConfidence, VoIPConfig};
+
+use crate::error::ProbeError;
 
 /// Port prediction prober for Symmetric NAT traversal.
 ///
@@ -65,7 +67,7 @@ impl PortPredictionProber {
     /// * `port_end` — End of predicted port range (inclusive)
     /// * `connection_id` — 12-byte CSPRNG QUIC Connection ID from CallRequest
     /// * `timeout_ms` — Timeout per individual connection attempt
-    #[instrument(skip(self, endpoint, connection_id),
+    #[instrument(skip(self, endpoint, _connection_id),
         fields(target_ip = %target_ip, port_start, port_end))]
     pub async fn probe_range(
         &self,
@@ -73,7 +75,7 @@ impl PortPredictionProber {
         target_ip: &str,
         port_start: u16,
         port_end: u16,
-        connection_id: &[u8],
+        _connection_id: &[u8],
         timeout_ms: u64,
     ) -> Result<Connection, ProbeError> {
         let range_size = (port_end as u32) - (port_start as u32) + 1;
@@ -215,14 +217,14 @@ impl PortPredictionProber {
         .map_err(|_| ProbeError::ProbeTimeout(timeout_ms))?
     }
 
-    /// Calculate the predicted port range from a PortPrediction.
+    /// Calculate the predicted port range from a PortPredictionData.
     ///
     /// This is a convenience method that returns the range directly
     /// from the prediction data.
-    pub fn predicted_range(prediction: &PortPrediction) -> (u16, u16) {
+    pub fn predicted_range(prediction: &PortPredictionData) -> (u16, u16) {
         (
-            prediction.predicted_port_start,
-            prediction.predicted_port_end,
+            prediction.predicted_port_start as u16,
+            prediction.predicted_port_end as u16,
         )
     }
 
@@ -254,8 +256,8 @@ async fn try_quic_connect_to_port(
     // In production, this could be the peer's domain or a fixed identifier
     let connecting = endpoint
         .connect(addr, "voip-peer")
-        .map_err(|e| ProbeError::QuicError(quinn::ConnectionError::TransportError(
-            quinn::TransportErrorCode::INTERNAL_ERROR,
+        .map_err(|_| ProbeError::QuicError(quinn::ConnectionError::TransportError(
+            quinn::TransportErrorCode::INTERNAL_ERROR.into(),
         )))?;
 
     let connection = connecting.await?;
@@ -276,14 +278,14 @@ async fn try_quic_connect_to_port(
 /// Success probability: ~60% (spec/09 §9.9 — "PARTIAL ~60%")
 pub struct OneSidedPredictionStrategy {
     /// The prediction from the predictable side
-    prediction: PortPrediction,
+    prediction: PortPredictionData,
     /// Config
     config: Arc<VoIPConfig>,
 }
 
 impl OneSidedPredictionStrategy {
     /// Create a new one-sided prediction strategy.
-    pub fn new(prediction: PortPrediction, config: Arc<VoIPConfig>) -> Self {
+    pub fn new(prediction: PortPredictionData, config: Arc<VoIPConfig>) -> Self {
         Self { prediction, config }
     }
 
@@ -302,8 +304,8 @@ impl OneSidedPredictionStrategy {
             .probe_range(
                 endpoint,
                 target_ip,
-                self.prediction.predicted_port_start,
-                self.prediction.predicted_port_end,
+                self.prediction.predicted_port_start as u16,
+                self.prediction.predicted_port_end as u16,
                 connection_id,
                 self.config.quic_prediction_timeout_ms,
             )

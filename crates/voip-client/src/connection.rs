@@ -18,19 +18,28 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use quinn::{ClientConfig, Connection, Endpoint, IdleTimeout, RecvStream, SendStream, VarInt};
+use quinn::{Connection, Endpoint, RecvStream, SendStream, VarInt};
 use tokio::sync::RwLock;
 use tracing::{debug, info, instrument, warn};
 
+use voip_core::proto::signaling::{NatInfo as ProtoNatInfo, PeerRecord, ProxyRecord};
 use voip_core::{
-    CallEndReason, ConnectError, ConnectionMethod, NATInfo, NATType, PeerRecord,
-    PredictionConfidence, ProxyRecord, VoIPConfig,
+    CallEndReason, ConnectionMethod, NATInfo, NATType,
+    VoIPConfig,
 };
 
+use crate::error::ConnectError;
 use crate::masque::MasqueTunnel;
 use crate::migration::ConnectionMigrator;
 use crate::nat_probe::NATProber;
 use crate::probe::PortPredictionProber;
+
+/// Helper: extract NATInfo from an optional proto NatInfo.
+fn proto_nat_info_to_native(proto: Option<&ProtoNatInfo>) -> NATInfo {
+    proto
+        .map(|n| NATInfo::from(n.clone()))
+        .unwrap_or(NATInfo::no_nat())
+}
 
 /// The established VoIP connection, wrapping a QUIC connection and metadata.
 pub struct VoipConnection {
@@ -113,10 +122,10 @@ impl ConnectionManager {
 
         Ok(Self {
             endpoint,
-            config,
+            config: config.clone(),
             nat_prober: Arc::new(RwLock::new(None)),
             prediction_prober: PortPredictionProber::new(config.clone()),
-            migrator: ConnectionMigrator::new(config.clone()),
+            migrator: ConnectionMigrator::new(config),
             local_nat_info: Arc::new(RwLock::new(None)),
             udp_blocked: Arc::new(RwLock::new(false)),
         })
@@ -126,10 +135,10 @@ impl ConnectionManager {
     pub fn with_endpoint(endpoint: Endpoint, config: Arc<VoIPConfig>) -> Self {
         Self {
             endpoint,
-            config,
-            nat_prober: Arc::new(RwLock::new(None)),
             prediction_prober: PortPredictionProber::new(config.clone()),
             migrator: ConnectionMigrator::new(config.clone()),
+            config: config,
+            nat_prober: Arc::new(RwLock::new(None)),
             local_nat_info: Arc::new(RwLock::new(None)),
             udp_blocked: Arc::new(RwLock::new(false)),
         }
@@ -161,7 +170,7 @@ impl ConnectionManager {
     pub async fn probe_nat(&self) -> Result<NATInfo, ConnectError> {
         let prober = self.nat_prober.read().await;
         if let Some(prober) = prober.as_ref() {
-            let result = prober.probe().await.map_err(ConnectError::NatProbeFailed)?;
+            let result = prober.probe().await.map_err(|e| ConnectError::NatProbeFailed(e.to_string()))?;
             *self.local_nat_info.write().await = Some(result.clone());
             Ok(result)
         } else {
@@ -184,9 +193,11 @@ impl ConnectionManager {
         let local_nat = self.local_nat_info.read().await.clone();
         let udp_blocked = *self.udp_blocked.read().await;
 
+        let peer_nat = proto_nat_info_to_native(peer.nat_info.as_ref());
+
         info!(
             local_nat = ?local_nat.as_ref().map(|n| n.nat_type),
-            peer_nat = ?peer.nat_info.nat_type,
+            peer_nat = ?peer_nat.nat_type,
             udp_blocked,
             "Starting connection establishment"
         );
@@ -211,7 +222,7 @@ impl ConnectionManager {
             .as_ref()
             .map(|n| n.nat_type == NATType::Cone)
             .unwrap_or(false);
-        let peer_has_cone = peer.nat_info.nat_type == NATType::Cone;
+        let peer_has_cone = peer_nat.nat_type == NATType::Cone;
 
         if (local_has_cone || peer_has_cone) && !udp_blocked {
             if let Some(conn) = self.try_simultaneous_open(peer, connection_id).await {
@@ -226,7 +237,7 @@ impl ConnectionManager {
             .as_ref()
             .map(|n| n.nat_type.is_predictable())
             .unwrap_or(false);
-        let peer_predictable = peer.nat_info.nat_type.is_predictable();
+        let peer_predictable = peer_nat.nat_type.is_predictable();
 
         if (local_predictable || peer_predictable) && !udp_blocked {
             if let Some(conn) = self
@@ -277,7 +288,7 @@ impl ConnectionManager {
                 .as_ref()
                 .map(|n| n.nat_type == NATType::SymmetricRandom)
                 .unwrap_or(false);
-            let peer_random = peer.nat_info.nat_type == NATType::SymmetricRandom;
+            let peer_random = peer_nat.nat_type == NATType::SymmetricRandom;
 
             if local_random && peer_random {
                 CallEndReason::FailedIpv4Random
@@ -331,7 +342,7 @@ impl ConnectionManager {
     async fn try_simultaneous_open(
         &self,
         peer: &PeerRecord,
-        connection_id: &[u8],
+        _connection_id: &[u8],
     ) -> Option<VoipConnection> {
         for addr_str in &peer.ipv4_reflexive {
             match addr_str.parse::<SocketAddr>() {
@@ -380,8 +391,10 @@ impl ConnectionManager {
         local_nat: &Option<NATInfo>,
         connection_id: &[u8],
     ) -> Option<VoipConnection> {
+        let peer_nat = proto_nat_info_to_native(peer.nat_info.as_ref());
+
         // We need at least one peer with prediction data
-        let peer_prediction = peer.nat_info.prediction.as_ref();
+        let peer_prediction = peer_nat.prediction.as_ref();
         let local_prediction = local_nat.as_ref().and_then(|n| n.prediction.as_ref());
 
         if peer_prediction.is_none() && local_prediction.is_none() {
@@ -391,8 +404,8 @@ impl ConnectionManager {
         // Try connecting to the peer's predicted port range
         if let Some(prediction) = peer_prediction {
             let ip = &prediction.external_ip;
-            let start = prediction.predicted_port_start;
-            let end = prediction.predicted_port_end;
+            let start = prediction.predicted_port_start as u16;
+            let end = prediction.predicted_port_end as u16;
 
             debug!(
                 ip = %ip,
@@ -499,22 +512,8 @@ impl ConnectionManager {
 
     /// Create a QUIC endpoint for outgoing connections.
     fn create_endpoint() -> Result<Endpoint, ConnectError> {
-        let rustls_config = rustls::ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoVerifier))
-            .with_no_client_auth();
-
-        let mut client_config = ClientConfig::new(Arc::new(rustls_config));
-
-        // Enable QUIC datagrams (RFC 9221) for MoQ media
-        client_config.datagram_receive_buffer_size(Some(65536));
-        client_config.datagram_send_buffer_size(65536);
-
-        // Set idle timeout
-        let idle_timeout = IdleTimeout::try_from(Duration::from_secs(30)).unwrap();
-        let mut transport = quinn::TransportConfig::default();
-        transport.max_idle_timeout(Some(idle_timeout));
-        client_config.transport_config(Arc::new(transport));
+        let client_config = crate::tls::dangerous_quinn_client_config()
+            .map_err(|e| ConnectError::NetworkError(e))?;
 
         let mut endpoint = Endpoint::client("[::]:0".parse().unwrap())
             .map_err(|e| ConnectError::NetworkError(e.to_string()))?;
@@ -538,7 +537,7 @@ impl ConnectionManager {
         let prober = self.nat_prober.read().await;
         if let Some(prober) = prober.as_ref() {
             prober.invalidate_cache().await;
-            let result = prober.probe().await.map_err(ConnectError::NatProbeFailed)?;
+            let result = prober.probe().await.map_err(|e| ConnectError::NatProbeFailed(e.to_string()))?;
             *self.local_nat_info.write().await = Some(result.clone());
             Ok(result)
         } else {
@@ -546,56 +545,6 @@ impl ConnectionManager {
                 "NAT prober not initialized".to_string(),
             ))
         }
-    }
-}
-
-/// A no-op certificate verifier for development.
-///
-/// In production, the signaling server and MASQUE proxies present valid
-/// TLS certificates verified against the system trust store. This verifier
-/// is used during development and for self-signed DHT-verified certificates.
-#[derive(Debug)]
-struct NoVerifier;
-
-impl rustls::client::danger::ServerCertVerifier for NoVerifier {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
-            rustls::SignatureScheme::ED25519,
-            rustls::SignatureScheme::RSA_PSS_SHA256,
-            rustls::SignatureScheme::RSA_PSS_SHA384,
-            rustls::SignatureScheme::RSA_PSS_SHA512,
-        ]
     }
 }
 

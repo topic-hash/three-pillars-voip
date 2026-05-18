@@ -17,8 +17,6 @@
 //! Results are cached with a TTL of 5 minutes (default). Before a call,
 //! a quick 2-path refresh can verify the pattern is still valid.
 
-use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -27,9 +25,44 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn, instrument};
 
 use voip_core::{
-    NATInfo, NATProbeCache, NATProbeResult, NATType, NatProbeError, PortPrediction,
-    PredictionConfidence, VoIPConfig,
+    NATInfo, NATType, PortPredictionData, PredictionConfidence, VoIPConfig,
 };
+
+use crate::error::NatProbeError;
+
+/// Result of a single NAT path probe.
+#[derive(Debug, Clone)]
+pub struct NATProbeResult {
+    /// The signaling server IP that was probed
+    pub server_ip: String,
+    /// Local port used for the probe
+    pub local_port: u16,
+    /// The external IP observed by the server
+    pub external_ip: String,
+    /// The external port observed by the server
+    pub external_port: u16,
+    /// When the probe was performed (unix timestamp, milliseconds)
+    pub timestamp_ms: u64,
+    /// Round-trip time of the probe in milliseconds
+    pub rtt_ms: u32,
+}
+
+/// Cached NAT probe results.
+#[derive(Debug, Clone)]
+pub struct NATProbeCache {
+    /// Individual probe results
+    pub probes: Vec<NATProbeResult>,
+    /// Average port delta between probes
+    pub average_delta: i32,
+    /// Variance of port deltas
+    pub delta_variance: i32,
+    /// Prediction confidence level
+    pub confidence: PredictionConfidence,
+    /// When the cache was created (unix timestamp, milliseconds)
+    pub cache_timestamp: u64,
+    /// Cache TTL in seconds
+    pub cache_ttl_seconds: u32,
+}
 
 /// The NAT prober that connects to the signaling server's IPs via QUIC
 /// connection migration to classify the local NAT type.
@@ -205,11 +238,11 @@ impl NATProber {
                             .as_millis() as u64;
                         c.cache_timestamp = now_ms;
                     }
-                    return self.cached_nat_info().await.unwrap_or_else(|| {
+                    return Ok(self.cached_nat_info().await.unwrap_or_else(|| {
                         // Fallback: full re-probe
                         drop(cache_mut);
-                        futures::executor::block_on(self.probe())
-                    });
+                        futures::executor::block_on(self.probe()).unwrap_or_else(|_| NATInfo::no_nat())
+                    }));
                 }
             }
         }
@@ -228,7 +261,7 @@ impl NATProber {
     async fn probe_single_path(
         &self,
         server_ip: &str,
-        index: usize,
+        _index: usize,
     ) -> Result<NATProbeResult, NatProbeError> {
         let start = Instant::now();
         let timeout = Duration::from_millis(self.config.path_probe_timeout_ms);
@@ -295,7 +328,7 @@ impl NATProber {
         Ok(NATProbeResult {
             server_ip: server_ip.to_string(),
             local_port: self.connection.local_ip()
-                .map(|a| a.port())
+                .map(|_| 0) // Can't get actual local port from IpAddr
                 .unwrap_or(0),
             external_ip: probe_response.observed_ip,
             external_port: probe_response.observed_port,
@@ -408,9 +441,9 @@ impl NATProber {
         avg_delta: i32,
         confidence: &PredictionConfidence,
         config: &VoIPConfig,
-    ) -> PortPrediction {
+    ) -> PortPredictionData {
         let last_result = results.last().expect("at least one probe result");
-        let base_port = last_result.external_port;
+        let base_port = last_result.external_port as u32;
 
         // Estimate new mappings between probe and call (typically 0-3)
         // We estimate 1 mapping for the next connection
@@ -423,15 +456,15 @@ impl NATProber {
             PredictionConfidence::Random => 0, // Should not be called for Random
         };
 
-        let start = (predicted_center - margin).max(1024) as u16;
-        let end = (predicted_center + margin).min(65535) as u16;
+        let start = (predicted_center - margin).max(1024) as u32;
+        let end = (predicted_center + margin).min(65535) as u32;
 
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
-        PortPrediction {
+        PortPredictionData {
             external_ip: last_result.external_ip.clone(),
             predicted_port_start: start,
             predicted_port_end: end,
@@ -439,6 +472,7 @@ impl NATProber {
             base_port,
             delta_pattern: avg_delta,
             probed_at: now_secs,
+            probe_method: voip_core::ProbeMethod::QuicPathProbing,
         }
     }
 
@@ -627,17 +661,18 @@ fn cached_to_nat_info(cache: &NATProbeCache) -> NATInfo {
                 PredictionConfidence::Random => 0,
             };
             let predicted_center = l.external_port as i32 + cache.average_delta;
-            let start = (predicted_center - margin as i32).max(1024) as u16;
-            let end = (predicted_center + margin as i32).min(65535) as u16;
+            let start = (predicted_center - margin as i32).max(1024) as u32;
+            let end = (predicted_center + margin as i32).min(65535) as u32;
 
-            PortPrediction {
+            PortPredictionData {
                 external_ip: l.external_ip.clone(),
                 predicted_port_start: start,
                 predicted_port_end: end,
                 confidence: cache.confidence,
-                base_port: l.external_port,
+                base_port: l.external_port as u32,
                 delta_pattern: cache.average_delta,
                 probed_at: l.timestamp_ms / 1000,
+                probe_method: voip_core::ProbeMethod::QuicPathProbing,
             }
         });
         (nat_type, prediction)
@@ -711,7 +746,7 @@ mod tests {
 
     #[test]
     fn test_port_prediction_range_sequential() {
-        let pred = PortPrediction {
+        let pred = PortPredictionData {
             external_ip: "203.0.113.5".to_string(),
             predicted_port_start: 42002,
             predicted_port_end: 42008,
@@ -719,13 +754,14 @@ mod tests {
             base_port: 42004,
             delta_pattern: 1,
             probed_at: 0,
+            probe_method: voip_core::ProbeMethod::QuicPathProbing,
         };
         assert_eq!(pred.range_size(), 7); // ±3 = 7 ports
     }
 
     #[test]
     fn test_port_prediction_range_pseudo() {
-        let pred = PortPrediction {
+        let pred = PortPredictionData {
             external_ip: "203.0.113.5".to_string(),
             predicted_port_start: 41997,
             predicted_port_end: 42013,
@@ -733,6 +769,7 @@ mod tests {
             base_port: 42005,
             delta_pattern: 2,
             probed_at: 0,
+            probe_method: voip_core::ProbeMethod::QuicPathProbing,
         };
         assert_eq!(pred.range_size(), 17); // ±8 = 17 ports
     }

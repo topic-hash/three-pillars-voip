@@ -9,7 +9,10 @@ crate-type = ["cdylib", "staticlib"]
 [dependencies]
 voip-core = { path = "../voip-core" }
 voip-client = { path = "../voip-client" }
-uniffi = { workspace = true }
+uniffi = { workspace = true, features = ["build", "tokio"] }
 tokio = { workspace = true }
 tracing = { workspace = true }
 once_cell = "1"
+
+[build-dependencies]
+uniffi = { workspace = true, features = ["build"] }

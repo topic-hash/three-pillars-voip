@@ -3,92 +3,52 @@
 //! UniFFI bindings that expose a simplified API to Kotlin/Swift for the
 //! Three Pillars VoIP project.
 //!
-//! This crate implements the FFI interface described in `voip.udl` using
-//! the UniFFI proc-macro approach (recommended for uniffi 0.28+). The UDL
-//! file is provided as a reference specification and can also be used with
-//! the `uniffi-bindgen` CLI for foreign binding generation.
-//!
-//! # Usage (Kotlin)
-//!
-//! ```kotlin
-//! val config = VoipConfig(
-//!     discoveryPrivacyFirst = true,
-//!     dhtLookupTimeoutMs = 200,
-//!     // ...
-//! )
-//! val client = VoipClient(config)
-//! client.init()
-//! client.call("peer-abc123")
-//! ```
-//!
-//! # Usage (Swift)
-//!
-//! ```swift
-//! let config = VoipConfig(
-//!     discoveryPrivacyFirst: true,
-//!     dhtLookupTimeoutMs: 200,
-//!     // ...
-//! )
-//! let client = VoipClient(config: config)
-//! try client.init()
-//! try client.call(peerId: "peer-abc123")
-//! ```
-//!
-//! # Generating Foreign Bindings
-//!
-//! ```bash
-//! # Build the library
-//! cargo build --release -p voip-ffi
-//!
-//! # Generate Kotlin bindings
-//! uniffi-bindgen generate --library target/release/libvoip_ffi.so --language kotlin --out-dir bindings/kotlin
-//!
-//! # Generate Swift bindings
-//! uniffi-bindgen generate --library target/release/libvoip_ffi.so --language swift --out-dir bindings/swift
-//! ```
+//! Uses the UDL-based workflow: the `voip.udl` file defines the interface,
+//! and `uniffi::uniffi_bindgen::generate_scaffolding` in `build.rs` generates
+//! the FFI glue code.
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use voip_client::{Client, error::ClientError};
+use voip_client::{client::Client, error::ClientError};
 use voip_core::VoIPConfig;
+
+// Include the auto-generated scaffolding from proc-macro approach.
+// This generates the UniFfiTag type and FFI scaffolding functions.
+uniffi::setup_scaffolding!("voip");
 
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
 
 /// FFI-safe error type exposed to Kotlin/Swift.
-///
-/// Maps directly to the `[Error] enum VoipError` in `voip.udl`.
-#[derive(Debug, thiserror::Error, uniffi::Error)]
+#[derive(Debug, Clone, uniffi::Enum)]
 pub enum VoipError {
-    #[error("Client not initialized")]
-    #[uniffi(error)]
     NotInitialized,
-    #[error("Call already in progress")]
-    #[uniffi(error)]
     CallInProgress,
-    #[error("No active call")]
-    #[uniffi(error)]
     NoActiveCall,
-    #[error("Connection failed: {0}")]
-    #[uniffi(error)]
     ConnectionFailed(String),
-    #[error("Call setup timeout: {0}")]
-    #[uniffi(error)]
     CallSetupTimeout(String),
-    #[error("Call rejected: {0}")]
-    #[uniffi(error)]
     CallRejected(String),
-    #[error("NAT traversal failed: {0}")]
-    #[uniffi(error)]
     NatTraversalFailed(String),
-    #[error("MASQUE relay failed: {0}")]
-    #[uniffi(error)]
     MasqueFailed(String),
-    #[error("Internal error: {0}")]
-    #[uniffi(error)]
     Internal(String),
+}
+
+impl std::fmt::Display for VoipError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VoipError::NotInitialized => write!(f, "Client not initialized"),
+            VoipError::CallInProgress => write!(f, "Call already in progress"),
+            VoipError::NoActiveCall => write!(f, "No active call"),
+            VoipError::ConnectionFailed(s) => write!(f, "Connection failed: {}", s),
+            VoipError::CallSetupTimeout(s) => write!(f, "Call setup timeout: {}", s),
+            VoipError::CallRejected(s) => write!(f, "Call rejected: {}", s),
+            VoipError::NatTraversalFailed(s) => write!(f, "NAT traversal failed: {}", s),
+            VoipError::MasqueFailed(s) => write!(f, "MASQUE relay failed: {}", s),
+            VoipError::Internal(s) => write!(f, "Internal error: {}", s),
+        }
+    }
 }
 
 impl From<ClientError> for VoipError {
@@ -104,6 +64,20 @@ impl From<ClientError> for VoipError {
             ClientError::MasqueFailed(s) => VoipError::MasqueFailed(s),
             ClientError::Audio(s) => VoipError::Internal(s),
             ClientError::Core(e) => VoipError::Internal(e.to_string()),
+            ClientError::AllMethodsFailed => VoipError::Internal("all connection methods failed".to_string()),
+            ClientError::QuicTimeout(ms) => VoipError::CallSetupTimeout(format!("QUIC timeout after {}ms", ms)),
+            ClientError::PredictionFailedRandom => VoipError::NatTraversalFailed("random NAT both sides".to_string()),
+            ClientError::UdpBlocked => VoipError::ConnectionFailed("UDP blocked".to_string()),
+            ClientError::TcpBlocked => VoipError::ConnectionFailed("TCP blocked".to_string()),
+            ClientError::MasqueUnreachable => VoipError::MasqueFailed("proxy unreachable".to_string()),
+            ClientError::MigrationFailed(s) => VoipError::ConnectionFailed(format!("migration: {}", s)),
+            ClientError::NetworkError(s) => VoipError::ConnectionFailed(s),
+            ClientError::SignalingError(s) => VoipError::ConnectionFailed(s),
+            ClientError::PeerTimeout => VoipError::CallSetupTimeout("peer timeout".to_string()),
+            ClientError::NatProbeError(s) => VoipError::NatTraversalFailed(s),
+            ClientError::ProbeError(s) => VoipError::NatTraversalFailed(s),
+            ClientError::AudioError(s) => VoipError::Internal(s),
+            ClientError::MigrationTimeout(ms) => VoipError::ConnectionFailed(format!("migration timeout {}ms", ms)),
         }
     }
 }
@@ -112,20 +86,12 @@ impl From<ClientError> for VoipError {
 // Enums
 // ---------------------------------------------------------------------------
 
-/// The current state of a VoIP call, observable by the UI layer.
-///
-/// Maps to `enum CallState` in `voip.udl`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum CallState {
-    /// No call in progress.
     Idle,
-    /// Outgoing call is ringing (waiting for peer to accept).
     Ringing,
-    /// Incoming call is ringing (waiting for user to accept).
     Incoming,
-    /// Call is connected — media is flowing.
     Connected,
-    /// Call has ended.
     Ended,
 }
 
@@ -141,22 +107,13 @@ impl From<voip_client::client::CallState> for CallState {
     }
 }
 
-/// How the direct P2P connection was established.
-///
-/// Maps to `enum ConnectionMethod` in `voip.udl`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum ConnectionMethod {
-    /// Not yet connected.
     None,
-    /// Direct IPv6 connection.
     Ipv6Direct,
-    /// IPv4 Cone NAT — QUIC simultaneous open.
     Ipv4Cone,
-    /// IPv4 Symmetric NAT — QUIC path probing + port prediction.
     Ipv4Prediction,
-    /// MASQUE CONNECT-UDP relay (RFC 9298) — bidirectional.
     Masque,
-    /// MASQUE CONNECT-UDP over HTTP/2 (UDP-blocked fallback).
     MasqueHttp2,
 }
 
@@ -173,33 +130,19 @@ impl From<voip_core::proto::signaling::ConnectionMethod> for ConnectionMethod {
     }
 }
 
-/// NAT type classification as detected by QUIC path probing.
-///
-/// Maps to `enum NATType` in `voip.udl`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum NATType {
-    /// IPv6, no NAT involved.
     None,
-    /// Full-Cone or Restricted-Cone NAT.
     Cone,
-    /// Symmetric NAT with +1/+2 delta.
     SymmetricSequential,
-    /// Symmetric NAT with +1 to +5 delta.
     SymmetricPseudo,
-    /// Symmetric NAT with random allocation.
     SymmetricRandom,
 }
 
-/// How a peer was discovered.
-///
-/// Maps to `enum DiscoveryMethod` in `voip.udl`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum DiscoveryMethod {
-    /// Found via DHT lookup.
     Dht,
-    /// Found via signaling server.
     Signaling,
-    /// Found in local peer address book cache.
     Cache,
 }
 
@@ -207,27 +150,15 @@ pub enum DiscoveryMethod {
 // Records (dictionaries)
 // ---------------------------------------------------------------------------
 
-/// Configuration for the VoIP client, serializable for mobile storage.
-///
-/// Maps to `dictionary VoipConfig` in `voip.udl`.
-/// See spec/11_Implementation_Stack.md §11.3 for full documentation.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct VoipConfig {
-    /// Discovery priority: true = DHT first (privacy), false = signaling first (speed).
     pub discovery_privacy_first: bool,
-    /// DHT lookup timeout before falling back to signaling (ms).
     pub dht_lookup_timeout_ms: u64,
-    /// DHT bootstrap nodes (hardcoded fallback).
     pub dht_bootstrap_nodes: Vec<String>,
-    /// Signaling server URL.
     pub signaling_server_url: String,
-    /// Enable MASQUE CONNECT-UDP fallback.
     pub masque_fallback_enabled: bool,
-    /// Enable push notification retry for failed connections.
     pub push_retry_enabled: bool,
-    /// QUIC connection timeout (ms).
     pub quic_connect_timeout_ms: u64,
-    /// Call ring timeout (ms).
     pub call_ring_timeout_ms: u64,
 }
 
@@ -238,7 +169,6 @@ impl Default for VoipConfig {
 }
 
 impl VoipConfig {
-    /// Convert to the core config type.
     pub fn to_core_config(&self) -> VoIPConfig {
         let mut config = VoIPConfig::default();
         config.discovery_privacy_first = self.discovery_privacy_first;
@@ -267,21 +197,12 @@ impl From<&VoIPConfig> for VoipConfig {
     }
 }
 
-/// Information about the current connection method and quality metrics.
-///
-/// Maps to `dictionary ConnectionInfo` in `voip.udl`.
-/// Observable by the UI layer to display connection quality.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct ConnectionInfo {
-    /// How the connection was established.
     pub method: ConnectionMethod,
-    /// Measured round-trip time in milliseconds.
     pub rtt_ms: u32,
-    /// Packet loss percentage (0-100).
     pub packet_loss_pct: f32,
-    /// Jitter in milliseconds.
     pub jitter_ms: u32,
-    /// How the peer was discovered.
     pub discovery_method: DiscoveryMethod,
 }
 
@@ -297,22 +218,13 @@ impl From<voip_client::client::ConnectionInfo> for ConnectionInfo {
     }
 }
 
-/// Statistics about a completed or in-progress call.
-///
-/// Maps to `dictionary CallStats` in `voip.udl`.
 #[derive(Debug, Clone, Default, uniffi::Record)]
 pub struct CallStats {
-    /// Call duration in seconds.
     pub duration_secs: u64,
-    /// Total bytes sent.
     pub bytes_sent: u64,
-    /// Total bytes received.
     pub bytes_received: u64,
-    /// Total packets sent.
     pub packets_sent: u64,
-    /// Total packets received.
     pub packets_received: u64,
-    /// Total packets lost.
     pub packets_lost: u64,
 }
 
@@ -333,11 +245,6 @@ impl From<voip_client::client::CallStats> for CallStats {
 // Tokio runtime (shared across all FFI calls)
 // ---------------------------------------------------------------------------
 
-/// Get or create the global tokio runtime for async operations.
-///
-/// The runtime is lazily initialized on first access and lives for the
-/// duration of the process. All FFI methods that need async operations
-/// use `runtime().block_on()` to bridge sync→async.
 fn runtime() -> &'static tokio::runtime::Runtime {
     use once_cell::sync::Lazy;
     static RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
@@ -353,19 +260,6 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 // VoipClient — main interface
 // ---------------------------------------------------------------------------
 
-/// The main VoIP client object exposed to Kotlin/Swift.
-///
-/// This is the primary interface for the mobile application layer.
-/// It manages call lifecycle, connection state, and audio routing.
-///
-/// Maps to `interface VoipClient` in `voip.udl`.
-///
-/// # Thread Safety
-///
-/// All methods are safe to call from any thread. The underlying
-/// client uses async Rust with tokio for all I/O operations.
-/// A shared tokio runtime is used internally to bridge the
-/// synchronous FFI calls to the async client methods.
 #[derive(uniffi::Object)]
 pub struct VoipClient {
     inner: Arc<RwLock<Option<Client>>>,
@@ -374,10 +268,6 @@ pub struct VoipClient {
 
 #[uniffi::export]
 impl VoipClient {
-    /// Create a new VoipClient with the given configuration.
-    ///
-    /// The client is not yet initialized; call `init()` before
-    /// placing or receiving calls.
     #[uniffi::constructor]
     pub fn new(config: VoipConfig) -> Self {
         Self {
@@ -386,16 +276,6 @@ impl VoipClient {
         }
     }
 
-    /// Initialize the VoIP client.
-    ///
-    /// Connects to the signaling server, bootstraps the DHT,
-    /// and performs NAT probing. Must be called before any other
-    /// method except `get_call_state()`.
-    ///
-    /// # Errors
-    ///
-    /// Returns `VoipError` if initialization fails (e.g., network
-    /// unreachable, signaling server down).
     pub fn init(&self) -> Result<(), VoipError> {
         let core_config = self.config.to_core_config();
         let client = Client::new(core_config);
@@ -407,16 +287,6 @@ impl VoipClient {
         })
     }
 
-    /// Place a call to the given peer.
-    ///
-    /// The `peer_id` is the hex-encoded Ed25519 public key of the
-    /// peer (32 bytes → 64 hex characters). Returns immediately;
-    /// call state transitions are observable via `get_call_state()`.
-    ///
-    /// # Errors
-    ///
-    /// - `NotInitialized` if `init()` was not called
-    /// - `CallInProgress` if a call is already active
     pub fn call(&self, peer_id: String) -> Result<(), VoipError> {
         runtime().block_on(async {
             let inner = self.inner.read().await;
@@ -426,12 +296,6 @@ impl VoipClient {
         })
     }
 
-    /// Hang up the current call.
-    ///
-    /// # Errors
-    ///
-    /// - `NotInitialized` if `init()` was not called
-    /// - `NoActiveCall` if no call is in progress
     pub fn hangup(&self) -> Result<(), VoipError> {
         runtime().block_on(async {
             let inner = self.inner.read().await;
@@ -441,15 +305,6 @@ impl VoipClient {
         })
     }
 
-    /// Mute the local audio (stop sending audio to peer).
-    ///
-    /// The peer will receive silence indicator. The call remains
-    /// connected; only the audio send path is muted.
-    ///
-    /// # Errors
-    ///
-    /// - `NotInitialized` if `init()` was not called
-    /// - `NoActiveCall` if no call is in progress
     pub fn mute(&self) -> Result<(), VoipError> {
         runtime().block_on(async {
             let inner = self.inner.read().await;
@@ -459,12 +314,6 @@ impl VoipClient {
         })
     }
 
-    /// Unmute the local audio (resume sending audio to peer).
-    ///
-    /// # Errors
-    ///
-    /// - `NotInitialized` if `init()` was not called
-    /// - `NoActiveCall` if no call is in progress
     pub fn unmute(&self) -> Result<(), VoipError> {
         runtime().block_on(async {
             let inner = self.inner.read().await;
@@ -474,10 +323,6 @@ impl VoipClient {
         })
     }
 
-    /// Get the current call state.
-    ///
-    /// Returns `Idle` if the client has not been initialized.
-    /// This method never fails and is safe to poll from the UI layer.
     pub fn get_call_state(&self) -> CallState {
         runtime().block_on(async {
             let inner = self.inner.read().await;
@@ -489,12 +334,6 @@ impl VoipClient {
         })
     }
 
-    /// Get information about the current connection.
-    ///
-    /// Returns `None` if not connected. The `ConnectionInfo` includes
-    /// the connection method (IPv6 direct, QUIC simultaneous open,
-    /// port prediction, MASQUE), quality metrics (RTT, packet loss,
-    /// jitter), and how the peer was discovered.
     pub fn get_connection_info(&self) -> Option<ConnectionInfo> {
         runtime().block_on(async {
             let inner = self.inner.read().await;
@@ -506,9 +345,6 @@ impl VoipClient {
         })
     }
 
-    /// Get call statistics for the current or most recent call.
-    ///
-    /// Returns zeroed stats if no call has been made.
     pub fn get_call_stats(&self) -> CallStats {
         runtime().block_on(async {
             let inner = self.inner.read().await;
@@ -520,9 +356,6 @@ impl VoipClient {
         })
     }
 
-    /// Get whether the client is currently muted.
-    ///
-    /// Returns `false` if the client is not initialized.
     pub fn is_muted(&self) -> bool {
         runtime().block_on(async {
             let inner = self.inner.read().await;
@@ -534,11 +367,6 @@ impl VoipClient {
         })
     }
 
-    /// Shut down the client gracefully.
-    ///
-    /// Ends any active call and releases network resources.
-    /// After shutdown, `init()` must be called again before
-    /// the client can be used.
     pub fn shutdown(&self) -> Result<(), VoipError> {
         runtime().block_on(async {
             let mut inner = self.inner.write().await;

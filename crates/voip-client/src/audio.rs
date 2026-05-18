@@ -15,11 +15,11 @@
 //! Frame size:    960 samples (48kHz × 20ms)
 //! ```
 
-use std::sync::Arc;
+use tracing::{info, instrument, warn};
 
-use tracing::{debug, info, instrument, warn};
+use voip_core::VoIPConfig;
 
-use voip_core::{AudioError, VoIPConfig};
+use crate::error::AudioError;
 
 /// Opus codec configuration matching spec/11 §11.4.
 #[derive(Debug, Clone)]
@@ -81,6 +81,15 @@ impl OpusConfig {
     pub fn max_packet_size(&self) -> usize {
         160
     }
+
+    /// Get the opus::Channels for this config.
+    fn opus_channels(&self) -> opus::Channels {
+        if self.channels == 1 {
+            opus::Channels::Mono
+        } else {
+            opus::Channels::Stereo
+        }
+    }
 }
 
 /// Opus audio encoder.
@@ -97,7 +106,7 @@ impl OpusEncoder {
     pub fn new(config: OpusConfig) -> Result<Self, AudioError> {
         let encoder = opus::Encoder::new(
             config.sample_rate,
-            opus::Channels::from(config.channels),
+            config.opus_channels(),
             config.application,
         )
         .map_err(|e| AudioError::EncoderError(format!("create encoder: {}", e)))?;
@@ -147,7 +156,7 @@ impl OpusEncoder {
         // Enable FEC (Forward Error Correction)
         if self.config.fec {
             self.encoder
-                .set_in_band_fec(true)
+                .set_inband_fec(true)
                 .map_err(|e| {
                     AudioError::EncoderError(format!("set FEC: {}", e))
                 })?;
@@ -164,7 +173,7 @@ impl OpusEncoder {
 
         // Set encoder complexity
         self.encoder
-            .set_complexity(self.config.complexity)
+            .set_complexity(self.config.complexity as i32)
             .map_err(|e| {
                 AudioError::EncoderError(format!("set complexity: {}", e))
             })?;
@@ -261,7 +270,7 @@ impl OpusDecoder {
     pub fn new(config: OpusConfig) -> Result<Self, AudioError> {
         let decoder = opus::Decoder::new(
             config.sample_rate,
-            opus::Channels::from(config.channels),
+            config.opus_channels(),
         )
         .map_err(|e| AudioError::DecoderError(format!("create decoder: {}", e)))?;
 
@@ -329,9 +338,11 @@ impl OpusDecoder {
         opus_data: &[u8],
         fec: bool,
     ) -> Result<Vec<i16>, AudioError> {
-        self.decoder
-            .decode_vec(opus_data, fec)
-            .map_err(|e| AudioError::DecoderError(format!("decode_vec: {}", e)))
+        let max_samples = self.config.frame_size * self.config.channels as usize;
+        let mut output = vec![0i16; max_samples];
+        let samples = self.decode(opus_data, &mut output, fec)?;
+        output.truncate(samples);
+        Ok(output)
     }
 
     /// Perform Packet Loss Concealment (PLC) when a packet is missing.
@@ -355,9 +366,11 @@ impl OpusDecoder {
 
     /// Perform PLC, returning samples as a Vec.
     pub fn plc_vec(&mut self) -> Result<Vec<i16>, AudioError> {
-        self.decoder
-            .decode_vec(&[], false)
-            .map_err(|e| AudioError::DecoderError(format!("PLC vec: {}", e)))
+        let max_samples = self.config.frame_size * self.config.channels as usize;
+        let mut output = vec![0i16; max_samples];
+        let samples = self.plc(&mut output)?;
+        output.truncate(samples);
+        Ok(output)
     }
 
     /// Get the configured frame size in samples.

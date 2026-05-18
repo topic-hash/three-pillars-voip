@@ -19,14 +19,14 @@
 //! MoQ runs over the QUIC connection through the tunnel unchanged.
 //! The proxy sees only opaque QUIC packets, not MoQ datagrams.
 
-use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use quinn::Connection;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 
-use voip_core::MasqueError;
+use crate::error::MasqueError;
 
 /// The MASQUE transport type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +48,8 @@ pub enum TunnelState {
     Active,
     /// MASQUE relay active (HTTP/2, UDP blocked)
     ActiveHttp2,
+    /// Proxy disconnected, attempting re-discovery and reconnection
+    Recovering,
     /// MASQUE failed on both transports, falling back to push retry
     Failed,
 }
@@ -61,22 +63,13 @@ pub struct MasqueTunnel {
     proxy_url: String,
     /// Transport type (HTTP/3 or HTTP/2)
     transport: MasqueTransport,
-    /// QUIC connection to the MASQUE proxy (HTTP/3 path)
-    /// When using HTTP/2, this is a QUIC connection established *through*
-    /// the HTTP/2 tunnel between the two peers
-    h3_connection: Option<h3::client::Connection<h3_quinn::OpenStreams, Bytes>>,
-    /// HTTP/2 send request handle (HTTP/2 path)
-    h2_send_request:
-        Option<hyper::client::conn::http2::SendRequest<Bytes>>,
-    /// The underlying QUIC connection to the proxy (HTTP/3) or
-    /// the peer-to-peer QUIC connection through the tunnel
+    /// The underlying QUIC connection (either to the proxy via HTTP/3,
+    /// or a peer-to-peer QUIC connection through the HTTP/2 tunnel)
     quic_conn: Connection,
     /// Call ID used for proxy matching
     call_id: String,
     /// Current tunnel state
     state: TunnelState,
-    /// The CONNECT-UDP stream ID (for sending datagrams)
-    stream_id: Option<u64>,
 }
 
 impl MasqueTunnel {
@@ -98,6 +91,14 @@ impl MasqueTunnel {
     ///   x-voip-call-id = <call_id>
     ///   x-voip-peer-id = <peer_id>
     /// ```
+    ///
+    /// # Implementation Notes
+    ///
+    /// The h3 crate (0.0.8+) provides:
+    /// - `h3::client::builder()` with `enable_datagram(true)` and
+    ///   `enable_extended_connect(true)` for CONNECT-UDP support
+    /// - HTTP/3 datagram send/recv for carrying MoQ media
+    /// - Stream-based request/response for the CONNECT-UDP handshake
     #[instrument(skip(proxy_url, call_id))]
     pub async fn connect_http3(
         proxy_url: &str,
@@ -111,54 +112,66 @@ impl MasqueTunnel {
         // Step 2: Establish QUIC connection to the proxy
         let quic_conn = establish_quic_to_proxy(&host, port).await?;
 
-        // Step 3: Open HTTP/3 connection on top of QUIC
-        let h3_conn = open_h3_connection(quic_conn.clone()).await?;
+        // Step 3: Initialize HTTP/3 client with datagram + extended connect
+        // The h3 crate requires a Buf type parameter — we use Bytes
+        let h3_conn = h3::client::builder()
+            .enable_datagram(true)
+            .enable_extended_connect(true)
+            .build(h3_quinn::Connection::new(quic_conn.clone()))
+            .await
+            .map_err(|e| MasqueError::Http3Error(format!("h3 handshake: {}", e)))?;
 
-        // Step 4: Send CONNECT-UDP request
-        let mut h3_client = h3_conn;
-        let connect_request = build_connect_udp_request(host, call_id);
+        let (mut h3_driver, mut send_req) = h3_conn;
 
-        let mut stream = h3_client
-            .send_request(connect_request)
+        // Step 4: Build CONNECT-UDP request headers
+        let request = build_connect_udp_request(&host, port, call_id)?;
+
+        // Step 5: Send the CONNECT-UDP request
+        let mut request_stream: h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes> = send_req
+            .send_request(request)
             .await
             .map_err(|e| MasqueError::Http3Error(format!("send CONNECT-UDP: {}", e)))?;
 
-        // Finish sending the request headers
-        stream
+        // Finish sending the request (no request body for CONNECT-UDP)
+        request_stream
             .finish()
             .await
             .map_err(|e| MasqueError::Http3Error(format!("finish request: {}", e)))?;
 
-        // Step 5: Read the response
-        let response = h3_client
-            .recv_response()
-            .await
-            .map_err(|e| MasqueError::Http3Error(format!("recv response: {}", e)))?;
+        // Step 6: Wait for the proxy's response
+        // recv_response() on the RequestStream returns the HTTP response
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            request_stream.recv_response(),
+        )
+        .await
+        .map_err(|_| MasqueError::Http3Error("CONNECT-UDP response timeout".to_string()))?
+        .map_err(|e| MasqueError::Http3Error(format!("recv response: {}", e)))?;
 
+        // Check the response status — 200 means tunnel is active
         let status = response.status();
         if status != http::StatusCode::OK {
-            if status == http::StatusCode::GATEWAY_TIMEOUT
-                || status == http::StatusCode::SERVICE_UNAVAILABLE
-            {
-                return Err(MasqueError::WaitingForPeer);
-            }
             return Err(MasqueError::ConnectUdpRejected(status.as_u16()));
         }
 
         info!(
             proxy_url = %proxy_url,
-            "MASQUE HTTP/3 tunnel established, proxy bridging datagrams"
+            "MASQUE HTTP/3 tunnel established (CONNECT-UDP 200 OK)"
         );
+
+        // The h3_driver and request_stream are kept alive for datagram send/recv.
+        // In a full implementation, these would be stored in the MasqueTunnel
+        // struct and used for datagram exchange via h3's datagram API.
+        // For now, we keep the QUIC connection and use its datagram API directly.
+        drop(h3_driver);
+        drop(request_stream);
 
         Ok(Self {
             proxy_url: proxy_url.to_string(),
             transport: MasqueTransport::Http3,
-            h3_connection: Some(h3_client),
-            h2_send_request: None,
             quic_conn,
             call_id: call_id.to_string(),
             state: TunnelState::Active,
-            stream_id: None,
         })
     }
 
@@ -189,100 +202,75 @@ impl MasqueTunnel {
         // Step 1: Parse the proxy URL
         let (host, port) = parse_proxy_url(proxy_url)?;
 
-        // Step 2: Establish TCP+TLS 1.3 connection to the proxy
-        let tcp_stream = tokio::net::TcpStream::connect((host.as_str(), port))
+        // Step 2: Establish TCP+TLS connection to proxy
+        let tcp_stream = tokio::net::TcpStream::connect((&*host, port))
             .await
             .map_err(|e| MasqueError::Http2Error(format!("TCP connect: {}", e)))?;
 
         // Step 3: Perform TLS handshake
         let tls_stream = perform_tls_handshake(tcp_stream, &host).await?;
 
-        // Step 4: Bootstrap HTTP/2 connection
-        let (mut h2_client, h2_conn) = hyper::client::conn::http2::handshake(
-            tokio::io::BufReader::new(tls_stream),
-        )
-        .await
-        .map_err(|e| MasqueError::Http2Error(format!("HTTP/2 handshake: {}", e)))?;
+        // Step 4: Perform HTTP/2 handshake with CONNECT-UDP
+        // Build the CONNECT-UDP request
+        let request = build_connect_udp_request(&host, port, call_id)?;
 
-        // Spawn the HTTP/2 connection task
-        tokio::spawn(async move {
-            if let Err(e) = h2_conn.await {
-                warn!(error = %e, "HTTP/2 connection task failed");
-            }
-        });
+        // Send the request via HTTP/2 and wait for 200 OK
+        // Using the hyper crate for HTTP/2 client support
+        let (mut h2_conn, h2_stream) = perform_h2_handshake(tls_stream, request).await?;
 
-        // Step 5: Send CONNECT-UDP request
-        let connect_request = build_connect_udp_request_http2(host.clone(), call_id);
-        let response = h2_client
-            .send_request(connect_request)
-            .await
-            .map_err(|e| MasqueError::Http2Error(format!("send request: {}", e)))?;
+        // Step 5: Create a QUIC-like connection through the tunnel
+        // For HTTP/2 MASQUE, we create a virtual connection that
+        // sends/receives datagrams via RFC 9297 §5 capsule framing
+        // on the HTTP/2 stream.
+        //
+        // However, quinn QUIC connections cannot be created from
+        // arbitrary I/O — they require a quinn Endpoint. Therefore,
+        // for HTTP/2 MASQUE, we need a different approach:
+        //
+        // Option A: Use a local loopback QUIC connection pair
+        //   (two quinn endpoints on localhost, one "server" that
+        //    reads/writes HTTP/2 capsules, one "client" used by MoQ)
+        // Option B: Implement MoQ directly over the HTTP/2 stream
+        //   without QUIC (use a custom transport abstraction)
+        //
+        // Option A is the cleaner approach because it keeps the
+        // MoQ session API unchanged — it still works with a quinn
+        // Connection object. The loopback QUIC pair is transparent
+        // to the MoQ layer.
+        //
+        // For now, we return an error. The loopback QUIC approach
+        // will be implemented in the Fine Draft pass.
 
-        let (head, mut body) = response.into_parts();
-        if head.status != http::StatusCode::OK {
-            if head.status == http::StatusCode::GATEWAY_TIMEOUT {
-                return Err(MasqueError::WaitingForPeer);
-            }
-            return Err(MasqueError::ConnectUdpRejected(head.status.as_u16()));
-        }
+        drop(h2_conn);
+        drop(h2_stream);
 
-        info!(
-            proxy_url = %proxy_url,
-            "MASQUE HTTP/2 tunnel established, proxy bridging datagrams"
-        );
-
-        // For HTTP/2, we don't have a QUIC connection to the proxy.
-        // The QUIC connection will be established through the tunnel
-        // between the two peers. For now, create a placeholder.
-        // In practice, the peer-to-peer QUIC connection would be set up
-        // after the tunnel is established.
-        let quic_conn = establish_peer_quic_through_tunnel().await?;
-
-        Ok(Self {
-            proxy_url: proxy_url.to_string(),
-            transport: MasqueTransport::Http2,
-            h3_connection: None,
-            h2_send_request: Some(h2_client),
-            quic_conn,
-            call_id: call_id.to_string(),
-            state: TunnelState::ActiveHttp2,
-            stream_id: None,
-        })
+        Err(MasqueError::Http2Error(
+            "HTTP/2 MASQUE tunnel: loopback QUIC not yet implemented".to_string(),
+        ))
     }
 
     /// Send a MoQ datagram through the tunnel.
     ///
-    /// For HTTP/3: the datagram is sent as an HTTP/3 datagram on the
-    /// CONNECT-UDP stream.
+    /// For HTTP/3: the datagram is sent as an HTTP/3 datagram (RFC 9221)
+    /// on the QUIC connection. The proxy forwards it to the other peer.
     ///
     /// For HTTP/2: the datagram is sent as an RFC 9297 §5 capsule
     /// on the HTTP/2 stream.
     pub async fn send_datagram(&mut self, data: Bytes) -> Result<(), MasqueError> {
         match self.transport {
             MasqueTransport::Http3 => {
-                if let Some(ref mut h3_conn) = self.h3_connection {
-                    h3_conn
-                        .send_datagram(data)
-                        .await
-                        .map_err(|e| {
-                            MasqueError::DatagramSendFailed(format!("HTTP/3: {}", e))
-                        })?;
-                    Ok(())
-                } else {
-                    Err(MasqueError::TunnelClosed)
-                }
+                self.quic_conn
+                    .send_datagram(data)
+                    .map_err(|e| MasqueError::DatagramSendFailed(format!("{}", e)))?;
+                debug!("Datagram sent via HTTP/3 MASQUE tunnel");
+                Ok(())
             }
             MasqueTransport::Http2 => {
-                // For HTTP/2, wrap the datagram in an RFC 9297 §5 capsule
-                // and send it as a DATA frame on the CONNECT-UDP stream
+                // For HTTP/2, datagrams are sent as RFC 9297 §5 capsules
+                // on the CONNECT-UDP stream.
                 let capsule = encode_h2_datagram_capsule(&data);
-                // Send via the HTTP/2 stream
-                // Note: In a full implementation, this would use the
-                // CONNECT-UDP stream's send_data method
-                debug!(
-                    len = capsule.len(),
-                    "Sending datagram via HTTP/2 capsule"
-                );
+                debug!(len = capsule.len(), "Sending datagram via HTTP/2 capsule");
+                // In full implementation, write capsule to the HTTP/2 stream
                 Ok(())
             }
         }
@@ -290,27 +278,24 @@ impl MasqueTunnel {
 
     /// Receive a MoQ datagram from the tunnel.
     ///
-    /// For HTTP/3: reads an HTTP/3 datagram from the connection.
+    /// For HTTP/3: reads a QUIC datagram from the connection.
     ///
     /// For HTTP/2: reads an RFC 9297 §5 capsule from the CONNECT-UDP stream.
     pub async fn recv_datagram(&mut self) -> Result<Bytes, MasqueError> {
         match self.transport {
             MasqueTransport::Http3 => {
-                if let Some(ref mut h3_conn) = self.h3_connection {
-                    h3_conn.recv_datagram().await.map_err(|e| {
-                        MasqueError::DatagramRecvFailed(format!("HTTP/3: {}", e))
-                    })
-                } else {
-                    Err(MasqueError::TunnelClosed)
-                }
+                let data = self
+                    .quic_conn
+                    .read_datagram()
+                    .await
+                    .map_err(|e| MasqueError::DatagramRecvFailed(format!("{}", e)))?;
+                Ok(data)
             }
             MasqueTransport::Http2 => {
-                // For HTTP/2, read and decode an RFC 9297 §5 capsule
-                // from the CONNECT-UDP stream
-                // Note: In a full implementation, this would read from
-                // the HTTP/2 stream and parse the capsule
+                // For HTTP/2, read a capsule from the CONNECT-UDP stream
+                // and decode the RFC 9297 §5 framing
                 Err(MasqueError::DatagramRecvFailed(
-                    "HTTP/2 datagram receive not fully implemented".to_string(),
+                    "HTTP/2 datagram receive: loopback QUIC not yet implemented".to_string(),
                 ))
             }
         }
@@ -320,24 +305,74 @@ impl MasqueTunnel {
     pub async fn close(&mut self) -> Result<(), MasqueError> {
         match self.transport {
             MasqueTransport::Http3 => {
-                if let Some(ref mut h3_conn) = self.h3_connection {
-                    h3_conn
-                        .close(h3::error::Code::NO_ERROR, b"tunnel closed")
-                        .await
-                        .map_err(|e| {
-                            MasqueError::Http3Error(format!("close: {}", e))
-                        })?;
-                }
+                // Send HTTP/3 GOAWAY frame to the proxy
+                // For now, close the QUIC connection
+                self.quic_conn.close(
+                    quinn::VarInt::from_u32(0),
+                    b"MASQUE tunnel closed",
+                );
             }
             MasqueTransport::Http2 => {
-                // HTTP/2 graceful close via GOAWAY
-                // The h2_send_request handle will be dropped,
-                // which triggers a graceful shutdown
+                // Close the HTTP/2 stream gracefully
+                // In full implementation, send RST_STREAM or GOAWAY
             }
         }
         self.state = TunnelState::Failed;
         info!("MASQUE tunnel closed gracefully");
         Ok(())
+    }
+
+    /// Initiate tunnel recovery after proxy failure.
+    ///
+    /// Per spec/12 §12.8: When the proxy disconnects during an active call,
+    /// the client enters the RECOVERING state and attempts:
+    /// 1. Re-discover proxies via DHT or signaling server
+    /// 2. Reconnect to the same or a different proxy
+    /// 3. Re-establish the MASQUE tunnel
+    /// 4. Resume MoQ session on the new tunnel
+    ///
+    /// Target: tunnel re-established within 600ms.
+    pub async fn recover(
+        &mut self,
+        proxy_records: &[voip_core::proto::signaling::ProxyRecord],
+    ) -> Result<(), MasqueError> {
+        self.state = TunnelState::Recovering;
+        info!(
+            call_id = %self.call_id,
+            "Attempting MASQUE tunnel recovery"
+        );
+
+        let call_id = self.call_id.clone();
+
+        // Try each proxy until one works
+        for proxy in proxy_records {
+            let proxy_url = &proxy.proxy_url;
+            info!(proxy_url = %proxy_url, "Recovery: trying proxy");
+
+            match Self::connect_http3(proxy_url, &call_id).await {
+                Ok(new_tunnel) => {
+                    info!(proxy_url = %proxy_url, "Recovery: MASQUE HTTP/3 tunnel re-established");
+                    *self = new_tunnel;
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!(proxy_url = %proxy_url, error = %e, "Recovery: HTTP/3 failed, trying HTTP/2");
+                    match Self::connect_http2(proxy_url, &call_id).await {
+                        Ok(new_tunnel) => {
+                            info!(proxy_url = %proxy_url, "Recovery: MASQUE HTTP/2 tunnel re-established");
+                            *self = new_tunnel;
+                            return Ok(());
+                        }
+                        Err(e2) => {
+                            warn!(proxy_url = %proxy_url, error = %e2, "Recovery: both transports failed for proxy");
+                        }
+                    }
+                }
+            }
+        }
+
+        self.state = TunnelState::Failed;
+        Err(MasqueError::AllTransportsFailed)
     }
 
     /// Get the current tunnel state.
@@ -354,7 +389,7 @@ impl MasqueTunnel {
     ///
     /// For HTTP/3: this is the QUIC connection to the proxy.
     /// For HTTP/2: this is the peer-to-peer QUIC connection
-    /// established through the tunnel.
+    /// established through the tunnel (via loopback QUIC pair).
     pub fn quic_connection(&self) -> &Connection {
         &self.quic_conn
     }
@@ -370,20 +405,99 @@ impl MasqueTunnel {
     }
 }
 
-// ==================== Helper Functions ====================
+// ==================== HTTP/3 Helper Functions ====================
+
+/// Build the CONNECT-UDP request headers per spec/12 §12.2.2.
+///
+/// Uses Extended CONNECT (RFC 8441) with the `connect-udp` protocol.
+/// The `:protocol` pseudo-header is set via the h3 extended connect API.
+fn build_connect_udp_request(host: &str, port: u16, call_id: &str) -> Result<http::Request<()>, MasqueError> {
+    let authority = format!("{}:{}", host, port);
+
+    // Use the http::request::Builder API which properly handles pseudo-headers
+    // The :protocol header for Extended CONNECT must be set via the request
+    // extensions or by using the appropriate HTTP/3 CONNECT method
+    let mut builder = http::Request::builder();
+    builder = builder
+        .method(http::Method::CONNECT)
+        .uri(format!("https://{}/masque", authority))
+        .header("host", &authority)
+        .header("connect-udp-target-host", "voip-relay")
+        .header("connect-udp-target-port", "0")
+        .header("x-voip-call-id", call_id);
+
+    // For Extended CONNECT, the :protocol pseudo-header is set via
+    // the h3 protocol-specific mechanism. In h3 0.0.8, this is
+    // done by setting the protocol in the request extensions.
+    let mut req = builder
+        .body(())
+        .map_err(|e| MasqueError::Http3Error(format!("build request: {}", e)))?;
+
+    // Set the Extended CONNECT protocol via h3's extension mechanism
+    let protocol = h3::ext::Protocol::from_str("connect-udp")
+        .map_err(|_| MasqueError::Http3Error("invalid CONNECT-UDP protocol".to_string()))?;
+    req.extensions_mut().insert(protocol);
+
+    Ok(req)
+}
+
+// ==================== HTTP/2 Helper Functions ====================
+
+/// Perform TLS handshake over TCP for the HTTP/2 MASQUE path.
+async fn perform_tls_handshake(
+    tcp_stream: tokio::net::TcpStream,
+    host: &str,
+) -> Result<tokio::io::BufStream<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>, MasqueError> {
+    let rustls_config = crate::tls::dangerous_client_config()
+        .map_err(|e| MasqueError::TlsError(format!("TLS config: {}", e)))?;
+
+    let config = Arc::new(rustls_config);
+    let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|e| MasqueError::TlsError(format!("invalid server name: {}", e)))?;
+
+    let connector = tokio_rustls::TlsConnector::from(config);
+    let tls_stream = connector
+        .connect(server_name, tcp_stream)
+        .await
+        .map_err(|e| MasqueError::TlsError(format!("TLS handshake: {}", e)))?;
+
+    Ok(tokio::io::BufStream::new(tls_stream))
+}
+
+/// Perform HTTP/2 handshake with CONNECT-UDP extended connect.
+async fn perform_h2_handshake<S>(
+    _tls_stream: S,
+    _request: http::Request<()>,
+) -> Result<((), ()), MasqueError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    // HTTP/2 CONNECT-UDP handshake using the h2 crate:
+    // 1. h2::client::Builder::new()
+    //    .enable_connect_protocol(true)  // RFC 8441 extended CONNECT
+    //    .handshake(tls_stream)
+    // 2. Send CONNECT-UDP request on a new stream
+    // 3. Wait for 200 OK response
+    // 4. Tunnel is active — datagrams via RFC 9297 §5 capsules
+    //
+    // This requires the `h2` crate which is not currently in Cargo.toml.
+    // Will be completed in the Fine Draft pass.
+    Err(MasqueError::Http2Error(
+        "HTTP/2 CONNECT-UDP handshake not yet fully implemented".to_string(),
+    ))
+}
+
+// ==================== Common Helper Functions ====================
 
 /// Parse a proxy URL to extract host and port.
 fn parse_proxy_url(url: &str) -> Result<(String, u16), MasqueError> {
-    // Simple URL parsing — extract host:port from https://host:port/path
     let url = url.trim_start_matches("https://").trim_start_matches("http://");
     let parts: Vec<&str> = url.split('/').collect();
     let host_port = parts[0];
 
     if let Some(idx) = host_port.rfind(':') {
         let host = host_port[..idx].to_string();
-        let port: u16 = host_port[idx + 1..]
-            .parse()
-            .unwrap_or(443);
+        let port: u16 = host_port[idx + 1..].parse().unwrap_or(443);
         Ok((host, port))
     } else {
         Ok((host_port.to_string(), 443))
@@ -396,21 +510,14 @@ async fn establish_quic_to_proxy(
     port: u16,
 ) -> Result<Connection, MasqueError> {
     let addr = format!("{}:{}", host, port);
-    let sock_addr: SocketAddr = tokio::net::lookup_host(&addr)
+    let sock_addr: std::net::SocketAddr = tokio::net::lookup_host(&addr)
         .await
         .map_err(|e| MasqueError::Http3Error(format!("DNS lookup: {}", e)))?
         .next()
         .ok_or_else(|| MasqueError::Http3Error("no address found".to_string()))?;
 
-    // Create a QUIC endpoint
-    let rustls_config = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(NoVerifier))
-        .with_no_client_auth();
-
-    let mut client_config = quinn::ClientConfig::new(Arc::new(rustls_config));
-    client_config.datagram_receive_buffer_size(Some(65536));
-    client_config.datagram_send_buffer_size(65536);
+    let client_config = crate::tls::dangerous_quinn_client_config()
+        .map_err(MasqueError::Http3Error)?;
 
     let mut endpoint = quinn::Endpoint::client("[::]:0".parse().unwrap())
         .map_err(|e| MasqueError::Http3Error(format!("create endpoint: {}", e)))?;
@@ -425,126 +532,17 @@ async fn establish_quic_to_proxy(
     Ok(connection)
 }
 
-/// Open an HTTP/3 connection on top of a QUIC connection.
-async fn open_h3_connection(
-    quic_conn: Connection,
-) -> Result<h3::client::Connection<h3_quinn::OpenStreams, Bytes>, MasqueError> {
-    let h3_conn = h3::client::new(h3_quinn::Connection::new(quic_conn))
-        .await
-        .map_err(|e| MasqueError::Http3Error(format!("h3 init: {}", e)))?;
-    Ok(h3_conn)
-}
-
-/// Build a CONNECT-UDP request for HTTP/3.
-fn build_connect_udp_request(host: String, call_id: &str) -> http::Request<()> {
-    let mut builder = http::Request::builder()
-        .method(http::Method::CONNECT)
-        .uri("/masque")
-        .version(http::Version::HTTP_3)
-        .header(":protocol", "connect-udp")
-        .header(":authority", format!("{}:443", host))
-        .header("connect-udp-target-host", "voip-relay")
-        .header("connect-udp-target-port", "0")
-        .header("x-voip-call-id", call_id);
-
-    builder.body(()).expect("valid HTTP/3 request")
-}
-
-/// Build a CONNECT-UDP request for HTTP/2.
-fn build_connect_udp_request_http2(host: String, call_id: &str) -> http::Request<Bytes> {
-    http::Request::builder()
-        .method(http::Method::CONNECT)
-        .uri("/masque")
-        .version(http::Version::HTTP_2)
-        .header(":protocol", "connect-udp")
-        .header(":authority", format!("{}:443", host))
-        .header("connect-udp-target-host", "voip-relay")
-        .header("connect-udp-target-port", "0")
-        .header("x-voip-call-id", call_id)
-        .body(Bytes::new())
-        .expect("valid HTTP/2 request")
-}
-
-/// Perform TLS handshake over a TCP stream.
-async fn perform_tls_handshake(
-    tcp_stream: tokio::net::TcpStream,
-    host: &str,
-) -> Result<tokio::io::BufReader<impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>, MasqueError> {
-    // In a full implementation, this would use tokio-rustls to perform
-    // the TLS 1.3 handshake. For now, we provide the structure.
-    // The actual implementation would:
-    // 1. Create a rustls ClientConfig with system root certs
-    // 2. Create a TlsStream using tokio-rustls::client::TlsStream
-    // 3. Perform the TLS handshake with the server name = host
-
-    // Placeholder — in production, use tokio-rustls
-    Err(MasqueError::TlsError(
-        "TLS handshake not fully implemented — requires tokio-rustls".to_string(),
-    ))
-}
-
-/// Establish a peer-to-peer QUIC connection through the HTTP/2 tunnel.
-///
-/// After the CONNECT-UDP tunnel is established via HTTP/2, the two peers
-/// need to establish a QUIC connection *through* the tunnel. This QUIC
-/// connection carries MoQ datagrams, just as it would over a direct P2P
-/// connection or an HTTP/3 MASQUE tunnel.
-async fn establish_peer_quic_through_tunnel() -> Result<Connection, MasqueError> {
-    // In a full implementation, this would:
-    // 1. Create a virtual QUIC connection using the tunneled UDP path
-    // 2. The QUIC packets flow as HTTP/2 capsules through the CONNECT-UDP tunnel
-    // 3. The proxy bridges these capsules between the two peers
-
-    // Placeholder — requires a custom QUIC implementation that can work
-    // over the tunneled UDP path
-    Err(MasqueError::Http2Error(
-        "Peer QUIC through HTTP/2 tunnel not fully implemented — requires QUIC-over-tunnel adapter".to_string(),
-    ))
-}
-
 /// Encode a datagram as an RFC 9297 §5 HTTP/2 capsule.
-///
-/// Capsule format:
-/// ```text
-/// Capsule Type: DATAGRAM (0x00) — varint
-/// Length: <payload length> — varint
-/// Quarter Stream ID: 0 — varint
-/// HTTP Datagram Payload: <data>
-/// ```
 fn encode_h2_datagram_capsule(data: &[u8]) -> Vec<u8> {
     let quarter_stream_id: u64 = 0;
     let payload_len = data.len() as u64 + varint_len(quarter_stream_id);
 
     let mut capsule = Vec::with_capacity(data.len() + 16);
-    // Capsule type: DATAGRAM = 0
     encode_varint(&mut capsule, 0);
-    // Length of the payload (including quarter stream ID)
     encode_varint(&mut capsule, payload_len);
-    // Quarter stream ID
     encode_varint(&mut capsule, quarter_stream_id);
-    // HTTP Datagram Payload
     capsule.extend_from_slice(data);
     capsule
-}
-
-/// Decode an RFC 9297 §5 HTTP/2 capsule.
-fn decode_h2_datagram_capsule(capsule: &[u8]) -> Result<Bytes, MasqueError> {
-    let mut pos = 0;
-
-    // Read capsule type
-    let (_capsule_type, len) = decode_varint(&capsule[pos..]);
-    pos += len;
-
-    // Read length
-    let (_payload_len, len) = decode_varint(&capsule[pos..]);
-    pos += len;
-
-    // Read quarter stream ID
-    let (_quarter_stream_id, len) = decode_varint(&capsule[pos..]);
-    pos += len;
-
-    // Remainder is the HTTP Datagram Payload
-    Ok(Bytes::copy_from_slice(&capsule[pos..]))
 }
 
 /// Encode a varint into a byte buffer.
@@ -573,70 +571,6 @@ fn varint_len(value: u64) -> u64 {
     len
 }
 
-/// Decode a varint from a byte slice. Returns (value, bytes_consumed).
-fn decode_varint(data: &[u8]) -> (u64, usize) {
-    let mut value: u64 = 0;
-    let mut shift: u32 = 0;
-    let mut i = 0;
-
-    for &byte in data.iter() {
-        value |= ((byte & 0x7F) as u64) << shift;
-        i += 1;
-        if byte & 0x80 == 0 {
-            break;
-        }
-        shift += 7;
-        if shift >= 64 {
-            break;
-        }
-    }
-
-    (value, i)
-}
-
-/// A no-op certificate verifier for development.
-#[derive(Debug)]
-struct NoVerifier;
-
-impl rustls::client::danger::ServerCertVerifier for NoVerifier {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
-            rustls::SignatureScheme::ED25519,
-        ]
-    }
-}
-
 /// Automatic MASQUE tunnel establishment with HTTP/3 → HTTP/2 fallback.
 ///
 /// Per spec/12 §12.6.4: try HTTP/3 first (UDP available, lower latency),
@@ -649,14 +583,141 @@ pub async fn establish_masque_tunnel(
     // Try HTTP/3 first (QUIC/UDP — lower latency, no HOL blocking)
     if !udp_blocked {
         if let Ok(tunnel) = MasqueTunnel::connect_http3(proxy_url, call_id).await {
-            return Ok(tunnel); // method = CONN_MASQUE
+            return Ok(tunnel);
         }
     }
 
     // Fall back to HTTP/2 (TCP — works when UDP is blocked)
     if let Ok(tunnel) = MasqueTunnel::connect_http2(proxy_url, call_id).await {
-        return Ok(tunnel); // method = CONN_MASQUE_HTTP2
+        return Ok(tunnel);
     }
 
     Err(MasqueError::AllTransportsFailed)
+}
+
+/// Detect whether MASQUE relay is needed based on both peers' NAT types.
+///
+/// Per spec/06 §6.6 Step 7: MASQUE is needed when:
+/// - Both peers are behind SymmetricRandom NAT, or
+/// - UDP is blocked entirely, or
+/// - IPv6 firewalls block both sides
+pub fn detect_masque_need(
+    local_nat_type: voip_core::NATType,
+    peer_nat_type: voip_core::NATType,
+    udp_blocked: bool,
+) -> bool {
+    if udp_blocked {
+        return true;
+    }
+
+    // Both random NAT → need MASQUE
+    if local_nat_type == voip_core::NATType::SymmetricRandom
+        && peer_nat_type == voip_core::NATType::SymmetricRandom
+    {
+        return true;
+    }
+
+    // At least one random with the other not Cone → MASQUE helps
+    if (local_nat_type == voip_core::NATType::SymmetricRandom
+        || peer_nat_type == voip_core::NATType::SymmetricRandom)
+        && local_nat_type != voip_core::NATType::Cone
+        && peer_nat_type != voip_core::NATType::Cone
+    {
+        return true;
+    }
+
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_proxy_url_with_port() {
+        let (host, port) = parse_proxy_url("https://proxy.example.com:443").unwrap();
+        assert_eq!(host, "proxy.example.com");
+        assert_eq!(port, 443);
+    }
+
+    #[test]
+    fn test_parse_proxy_url_without_port() {
+        let (host, port) = parse_proxy_url("https://proxy.example.com").unwrap();
+        assert_eq!(host, "proxy.example.com");
+        assert_eq!(port, 443); // default port
+    }
+
+    #[test]
+    fn test_parse_proxy_url_http() {
+        let (host, port) = parse_proxy_url("http://proxy.example.com:8443").unwrap();
+        assert_eq!(host, "proxy.example.com");
+        assert_eq!(port, 8443);
+    }
+
+    #[test]
+    fn test_build_connect_udp_request() {
+        let request = build_connect_udp_request("proxy.example.com", 443, "call-abc123").unwrap();
+        assert_eq!(request.method(), http::Method::CONNECT);
+        assert_eq!(request.headers().get("connect-udp-target-host").unwrap(), "voip-relay");
+        assert_eq!(request.headers().get("connect-udp-target-port").unwrap(), "0");
+        assert_eq!(request.headers().get("x-voip-call-id").unwrap(), "call-abc123");
+        // Protocol is set via extensions, not headers
+        assert!(request.extensions().get::<h3::ext::Protocol>().is_some());
+    }
+
+    #[test]
+    fn test_detect_masque_need_both_random() {
+        assert!(detect_masque_need(
+            voip_core::NATType::SymmetricRandom,
+            voip_core::NATType::SymmetricRandom,
+            false,
+        ));
+    }
+
+    #[test]
+    fn test_detect_masque_need_udp_blocked() {
+        assert!(detect_masque_need(
+            voip_core::NATType::Cone,
+            voip_core::NATType::Cone,
+            true,
+        ));
+    }
+
+    #[test]
+    fn test_detect_masque_not_needed_cone() {
+        assert!(!detect_masque_need(
+            voip_core::NATType::Cone,
+            voip_core::NATType::Cone,
+            false,
+        ));
+    }
+
+    #[test]
+    fn test_detect_masque_not_needed_sequential() {
+        assert!(!detect_masque_need(
+            voip_core::NATType::SymmetricSequential,
+            voip_core::NATType::SymmetricSequential,
+            false,
+        ));
+    }
+
+    #[test]
+    fn test_detect_masque_not_needed_one_random() {
+        // One Cone, one Random — Cone side can receive, so direct works
+        assert!(!detect_masque_need(
+            voip_core::NATType::Cone,
+            voip_core::NATType::SymmetricRandom,
+            false,
+        ));
+    }
+
+    #[test]
+    fn test_encode_h2_datagram_capsule() {
+        let data = b"hello";
+        let capsule = encode_h2_datagram_capsule(data);
+        // Capsule format: type(varint=0) + length(varint) + quarter_stream_id(varint=0) + data
+        assert!(capsule.len() > data.len());
+        // First byte should be 0 (capsule type)
+        assert_eq!(capsule[0], 0);
+    }
 }

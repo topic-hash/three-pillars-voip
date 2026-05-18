@@ -29,13 +29,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use quinn::Connection;
-use tokio::sync::RwLock;
 use tracing::{debug, error, info, instrument, warn};
 
-use voip_core::{
-    CallEndReason, ConnectionMigration, MigrationError, NATInfo, VoIPConfig,
-};
+use voip_core::proto::signaling::ConnectionMigration;
+use voip_core::{NATInfo, VoIPConfig};
 
+use crate::error::MigrationError;
 use crate::nat_probe::NATProber;
 
 /// The result of a connection migration attempt.
@@ -269,8 +268,13 @@ impl ConnectionMigrator {
             }
 
             // Check the current local address
-            if let Some(local_addr) = connection.local_ip() {
-                // Connection still alive, path may have migrated
+            // local_ip() returns Option<IpAddr>, but we need a SocketAddr.
+            // Use the connection's local_ip and combine with the local port.
+            if let Some(local_ip) = connection.local_ip() {
+                // Construct a SocketAddr from the local IP.
+                // Use port 0 as a placeholder since we can't determine
+                // the actual local port from the QUIC connection directly.
+                let local_addr = SocketAddr::new(local_ip, 0);
                 return Ok(local_addr);
             }
 
@@ -299,7 +303,7 @@ impl ConnectionMigrator {
 
         // Build the ConnectionMigration message
         // Wire format: 2-byte type ID (0x0001 for connection_migration) + prost payload
-        let migration = build_migration_message(new_nat_info);
+        let _migration = build_migration_message(new_nat_info);
 
         // Encode the message
         let type_id: u16 = 0x0001;
@@ -314,7 +318,6 @@ impl ConnectionMigrator {
             .map_err(|e| MigrationError::PathValidationFailed(e.to_string()))?;
 
         send.finish()
-            .await
             .map_err(|e| MigrationError::PathValidationFailed(e.to_string()))?;
 
         debug!("Migration notification sent to peer");
@@ -340,14 +343,9 @@ fn build_migration_message(new_nat_info: &Option<NATInfo>) -> ConnectionMigratio
     let new_prediction = new_nat_info
         .as_ref()
         .and_then(|info| info.prediction.clone())
-        .map(|p| voip_core::PortPrediction {
-            external_ip: p.external_ip,
-            predicted_port_start: p.predicted_port_start,
-            predicted_port_end: p.predicted_port_end,
-            confidence: p.confidence,
-            base_port: p.base_port,
-            delta_pattern: p.delta_pattern,
-            probed_at: p.probed_at,
+        .map(|p| {
+            let proto_prediction: voip_core::proto::signaling::PortPrediction = p.into();
+            proto_prediction
         });
 
     ConnectionMigration {

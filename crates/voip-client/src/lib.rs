@@ -27,8 +27,10 @@ pub mod connection;
 pub mod error;
 pub mod masque;
 pub mod migration;
+pub mod moq;
 pub mod nat_probe;
 pub mod probe;
+pub mod tls;
 
 // Re-export key types from voip-core for convenience
 pub use voip_core::config::VoIPConfig;
@@ -37,5 +39,10 @@ pub use voip_core::types::{
     MediaType, PeerStatus, PortPredictionData, PredictionConfidence, ProbeMethod,
     TrackInfo,
 };
-pub use voip_core::error::{MasqueError, VoipError};
+pub use voip_core::error::VoipError;
 pub use voip_core::state::CallStateMachine;
+
+// Re-export local error types
+pub use error::{
+    AudioError, ClientError, ConnectError, MasqueError, MigrationError, MoqError, NatProbeError, ProbeError,
+};
