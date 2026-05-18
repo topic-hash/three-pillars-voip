@@ -360,7 +360,7 @@ impl DhtNode {
                 let mut kad_config = KademliaConfig::new(protocol_name);
 
                 if is_mobile {
-                    // Mobile: lookup-only mode.
+                    // Mobile: lookup-only mode (spec §6.2.3).
                     // Shorter query timeout, don't act as a provider or store records for others.
                     kad_config.set_query_timeout(Duration::from_secs(5));
                 } else {
@@ -372,7 +372,17 @@ impl DhtNode {
                     }
                 }
 
-                KademliaBehaviour::with_config(peer_id, store, kad_config)
+                let mut behaviour = KademliaBehaviour::with_config(peer_id, store, kad_config);
+
+                if is_mobile {
+                    // Per spec §6.2.3: mobile clients must NOT maintain routing tables
+                    // or answer queries from other nodes. Setting Mode::Client disables
+                    // routing table maintenance and stops the node from answering
+                    // queries — it only performs lookups.
+                    behaviour.set_mode(Some(kad::Mode::Client));
+                }
+
+                behaviour
             })
             .expect("with_behaviour cannot fail when returning behaviour directly")
             .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(30)))

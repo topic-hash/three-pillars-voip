@@ -14,8 +14,13 @@ use crate::state::{type_id, AppState, FramedMessage};
 
 /// Reasons that are retryable — the peer should be notified to re-attempt.
 /// See spec/08 §8.5.2 and `CallEndReason::should_retry()`.
-const RETRYABLE_REASONS: [i32; 2] = [
+///
+/// - 3: END_FAILED_IPV4_RANDOM
+/// - 4: END_FAILED_UDP_BLOCKED
+/// - 7: END_FAILED_MASQUE_UNREACHABLE
+const RETRYABLE_REASONS: [i32; 3] = [
     3, // END_FAILED_IPV4_RANDOM
+    4, // END_FAILED_UDP_BLOCKED
     7, // END_FAILED_MASQUE_UNREACHABLE
 ];
 
@@ -210,7 +215,7 @@ pub async fn handle_retryable_failure(
     let peer_info = state.get_peer(other_peer_id).await;
     if let Some(info) = peer_info {
         if let Some(fcm_token) = info.fcm_token {
-            let notifier = PushNotifier::new_stub(); // TODO: share a single instance via AppState
+            let notifier = &state.inner.push_notifier;
             let notification = PushNotification {
                 fcm_token,
                 call_id: call_id.to_owned(),

@@ -501,10 +501,12 @@ async fn ws_handle_call_failed(
 
         let reason_val = msg.reason;
 
-        // If NAT incompatibility or UDP blocked, try MASQUE relay coordination
-        // END_FAILED_IPV4_RANDOM = 3, END_FAILED_UDP_BLOCKED = 4
-        // Per spec/06 §6.7 Step 9: server detects MASQUE need and sends
-        // MasqueRelayNeeded to both peers.
+        // Detect MASQUE need based on the failure reason.
+        // END_FAILED_IPV4_RANDOM = 3: both peers SymmetricRandom
+        // END_FAILED_UDP_BLOCKED = 4: UDP is blocked on the path
+        // Per spec/06 §6.7 Step 9 and spec/12: server detects MASQUE need
+        // and sends MasqueRelayNeeded to both peers.
+        let _udp_blocked = reason_val == 4;
         if reason_val == 3 || reason_val == 4 {
             if let Err(e) = state
                 .coordinate_masque_relay(&call_id, &call_entry.caller_id, &call_entry.callee_id)

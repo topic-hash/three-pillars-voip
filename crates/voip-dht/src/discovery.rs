@@ -25,6 +25,7 @@
 
 use std::time::Duration;
 
+use ed25519_dalek::SigningKey;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
@@ -68,60 +69,305 @@ impl From<bool> for DiscoveryMode {
 }
 
 // ---------------------------------------------------------------------------
-// Signaling server client (stub)
+// Signaling server client
 // ---------------------------------------------------------------------------
 
 /// A minimal signaling server client for fallback lookups.
 ///
-/// In production, this would use QUIC/WebSocket to the signaling server.
-/// For now, it provides the interface and a stub implementation.
+/// Communicates with the signaling server via HTTP REST endpoints.
+/// The signaling server provides peer lookup, username resolution,
+/// proxy discovery, and DHT bootstrap node information as a fallback
+/// when the DHT is unavailable or slow.
+///
+/// # Endpoints
+///
+/// | Method | Path                         | Description                       |
+/// |--------|------------------------------|-----------------------------------|
+/// | GET    | `/v1/peers/{peer_id}`        | Peer lookup                       |
+/// | GET    | `/v1/peers/lookup?username=` | Username → peer_id resolution     |
+/// | GET    | `/v1/proxies`                | MASQUE proxy discovery            |
+/// | GET    | `/v1/dht/bootstrap`          | DHT bootstrap node multiaddresses |
 #[derive(Debug, Clone)]
 pub struct SignalingClient {
     /// Base URL of the signaling server (e.g., "https://signal.example.com").
     server_url: String,
+    /// Shared HTTP client for making requests to the signaling server.
+    http_client: reqwest::Client,
+}
+
+// ---- JSON response types matching the signaling server's API ----
+
+/// Response from `GET /v1/peers/{peer_id}`.
+#[derive(Debug, serde::Deserialize)]
+struct PeerResponse {
+    peer_id: String,
+    display_name: String,
+    #[serde(default)]
+    ipv6_addresses: Vec<String>,
+    #[serde(default)]
+    ipv4_reflexive: Vec<String>,
+    #[serde(default)]
+    nat_type: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    last_seen: u64,
+}
+
+impl PeerResponse {
+    /// Returns the last_seen timestamp from the signaling server response.
+    #[allow(dead_code)]
+    pub fn last_seen(&self) -> u64 {
+        self.last_seen
+    }
+}
+
+/// Response from `GET /v1/peers/lookup?username={name}`.
+#[derive(Debug, serde::Deserialize)]
+struct LookupResponse {
+    peer_id: String,
+    #[allow(dead_code)]
+    display_name: String,
+    #[allow(dead_code)]
+    status: String,
+}
+
+/// Response from `GET /v1/proxies`.
+#[derive(Debug, serde::Deserialize)]
+struct ProxiesResponse {
+    proxies: Vec<ProxyEntry>,
+}
+
+/// A single proxy entry in the proxies response.
+#[derive(Debug, serde::Deserialize)]
+struct ProxyEntry {
+    node_id: String,
+    proxy_url: String,
+    #[serde(default)]
+    capacity: u32,
+    region: String,
+    #[serde(default)]
+    latency_hint_ms: u32,
+}
+
+/// Response from `GET /v1/dht/bootstrap`.
+#[derive(Debug, serde::Deserialize)]
+struct DhtBootstrapResponse {
+    nodes: Vec<String>,
 }
 
 impl SignalingClient {
     /// Create a new signaling client pointing at the given server URL.
     pub fn new(server_url: String) -> Self {
-        Self { server_url }
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap_or_default();
+        Self {
+            server_url,
+            http_client,
+        }
     }
 
     /// Look up a peer by ID on the signaling server.
     ///
     /// Corresponds to `GET /v1/peers/{peer_id}`.
-    pub async fn lookup_peer(&self, _peer_id: &str) -> Result<PeerRecord, DhtError> {
-        // TODO: Implement actual HTTP request to signaling server.
-        // For now, return not found to exercise the fallback path.
-        warn!("Signaling server lookup not yet implemented");
-        Err(DhtError::not_found("signaling:peer"))
+    ///
+    /// Returns a `PeerRecord` populated from the signaling server's
+    /// response. Note that the signaling server does not return a
+    /// signed record — the signature field will be empty.
+    pub async fn lookup_peer(&self, peer_id: &str) -> Result<PeerRecord, DhtError> {
+        let url = format!("{}/v1/peers/{}", self.server_url, peer_id);
+        debug!(url = %url, "Looking up peer on signaling server");
+
+        let response = self
+            .http_client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| DhtError::Http(format!("Failed to connect to signaling server: {e}")))?;
+
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(DhtError::NotFound {
+                key: format!("signaling:peer:{peer_id}"),
+            });
+        }
+
+        if !response.status().is_success() {
+            let status = response.status();
+            return Err(DhtError::Http(format!(
+                "Signaling server returned {status} for peer lookup"
+            )));
+        }
+
+        let peer_resp: PeerResponse = response
+            .json()
+            .await
+            .map_err(|e| DhtError::Serialization(format!(
+                "Failed to parse signaling server peer response: {e}"
+            )))?;
+
+        // Map the string status to PeerStatus enum.
+        let status = match peer_resp.status.to_lowercase().as_str() {
+            "online" => crate::record::PeerStatus::Online,
+            "in_call" => crate::record::PeerStatus::InCall,
+            _ => crate::record::PeerStatus::Offline,
+        };
+
+        // Map the string nat_type to NatType enum.
+        let nat_info = match peer_resp.nat_type.to_lowercase().as_str() {
+            "cone" => Some(crate::record::NatInfo {
+                nat_type: crate::record::NatType::Cone,
+                prediction: None,
+            }),
+            "symmetric_sequential" | "symmetricsequential" => Some(crate::record::NatInfo {
+                nat_type: crate::record::NatType::SymmetricSequential,
+                prediction: None,
+            }),
+            "symmetric_pseudo" | "symmetricpseudo" => Some(crate::record::NatInfo {
+                nat_type: crate::record::NatType::SymmetricPseudo,
+                prediction: None,
+            }),
+            "symmetric_random" | "symmetricrandom" => Some(crate::record::NatInfo {
+                nat_type: crate::record::NatType::SymmetricRandom,
+                prediction: None,
+            }),
+            _ => None,
+        };
+
+        Ok(PeerRecord::new_unsigned(
+            peer_resp.peer_id,
+            peer_resp.display_name,
+            peer_resp.ipv6_addresses,
+            peer_resp.ipv4_reflexive,
+            nat_info,
+            vec![],
+            status,
+            3600,
+        ))
     }
 
     /// Resolve a username on the signaling server.
     ///
     /// Corresponds to `GET /v1/peers/lookup?username={username}`.
-    pub async fn lookup_username(&self, _username: &str) -> Result<String, DhtError> {
-        // TODO: Implement actual HTTP request.
-        warn!("Signaling server username lookup not yet implemented");
-        Err(DhtError::not_found("signaling:username"))
+    ///
+    /// Returns the peer ID associated with the given username.
+    pub async fn lookup_username(&self, username: &str) -> Result<String, DhtError> {
+        let url = format!("{}/v1/peers/lookup?username={}", self.server_url, username);
+        debug!(url = %url, "Looking up username on signaling server");
+
+        let response = self
+            .http_client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| DhtError::Http(format!("Failed to connect to signaling server: {e}")))?;
+
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(DhtError::UsernameNotFound {
+                username: username.to_string(),
+            });
+        }
+
+        if !response.status().is_success() {
+            let status = response.status();
+            return Err(DhtError::Http(format!(
+                "Signaling server returned {status} for username lookup"
+            )));
+        }
+
+        let lookup_resp: LookupResponse = response
+            .json()
+            .await
+            .map_err(|e| DhtError::Serialization(format!(
+                "Failed to parse signaling server lookup response: {e}"
+            )))?;
+
+        Ok(lookup_resp.peer_id)
     }
 
     /// Get available MASQUE proxies from the signaling server.
     ///
     /// Corresponds to `GET /v1/proxies`.
+    ///
+    /// Returns a list of `ProxyRecord`s populated from the signaling
+    /// server's response. The records are unsigned (signature is empty)
+    /// since the signaling server does not provide proxy signatures.
     pub async fn get_proxies(&self) -> Result<Vec<ProxyRecord>, DhtError> {
-        // TODO: Implement actual HTTP request.
-        warn!("Signaling server proxy lookup not yet implemented");
-        Err(DhtError::not_found("signaling:proxies"))
+        let url = format!("{}/v1/proxies", self.server_url);
+        debug!(url = %url, "Getting proxies from signaling server");
+
+        let response = self
+            .http_client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| DhtError::Http(format!("Failed to connect to signaling server: {e}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            return Err(DhtError::Http(format!(
+                "Signaling server returned {status} for proxy lookup"
+            )));
+        }
+
+        let proxies_resp: ProxiesResponse = response
+            .json()
+            .await
+            .map_err(|e| DhtError::Serialization(format!(
+                "Failed to parse signaling server proxies response: {e}"
+            )))?;
+
+        let proxies = proxies_resp
+            .proxies
+            .into_iter()
+            .map(|entry| {
+                ProxyRecord::new_unsigned(
+                    entry.node_id,
+                    entry.proxy_url,
+                    entry.capacity,
+                    entry.region,
+                    entry.latency_hint_ms,
+                    3600,
+                    String::new(), // cert_fingerprint not provided by signaling server
+                )
+            })
+            .collect();
+
+        Ok(proxies)
     }
 
     /// Get DHT bootstrap nodes from the signaling server.
     ///
     /// Corresponds to `GET /v1/dht/bootstrap`.
+    ///
+    /// Returns a list of multiaddress strings for DHT bootstrap nodes.
     pub async fn get_bootstrap_nodes(&self) -> Result<Vec<String>, DhtError> {
-        // TODO: Implement actual HTTP request.
-        warn!("Signaling server bootstrap node lookup not yet implemented");
-        Err(DhtError::not_found("signaling:bootstrap"))
+        let url = format!("{}/v1/dht/bootstrap", self.server_url);
+        debug!(url = %url, "Getting DHT bootstrap nodes from signaling server");
+
+        let response = self
+            .http_client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| DhtError::Http(format!("Failed to connect to signaling server: {e}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            return Err(DhtError::Http(format!(
+                "Signaling server returned {status} for bootstrap node lookup"
+            )));
+        }
+
+        let bootstrap_resp: DhtBootstrapResponse = response
+            .json()
+            .await
+            .map_err(|e| DhtError::Serialization(format!(
+                "Failed to parse signaling server bootstrap response: {e}"
+            )))?;
+
+        Ok(bootstrap_resp.nodes)
     }
 
     /// Get the server URL.
@@ -362,9 +608,14 @@ impl DiscoveryService {
     /// 4. Select proxy with lowest measured latency
     ///
     /// Falls back to signaling server (`GET /v1/proxies`) if DHT fails.
-    pub async fn discover_proxy(&self) -> Result<Vec<ProxyRecord>, DhtError> {
+    ///
+    /// # Arguments
+    ///
+    /// * `node_ids` - Known proxy node IDs to look up in the DHT.
+    ///   If empty, the DHT lookup is skipped and the signaling fallback is used.
+    pub async fn discover_proxy(&self, node_ids: &[String]) -> Result<Vec<ProxyRecord>, DhtError> {
         if self.privacy_first {
-            match self.discover_proxy_dht().await {
+            match self.discover_proxy_dht(node_ids).await {
                 Ok(proxies) if !proxies.is_empty() => Ok(proxies),
                 _ => {
                     warn!("DHT proxy discovery failed, falling back to signaling");
@@ -376,7 +627,7 @@ impl DiscoveryService {
                 Ok(proxies) if !proxies.is_empty() => Ok(proxies),
                 _ => {
                     warn!("Signaling proxy discovery failed, falling back to DHT");
-                    self.discover_proxy_dht().await
+                    self.discover_proxy_dht(node_ids).await
                 }
             }
         }
@@ -384,22 +635,60 @@ impl DiscoveryService {
 
     /// Discover proxies via the DHT.
     ///
-    /// Note: This requires knowing the node_ids of proxy nodes. In practice,
-    /// this would be done by iterating known node IDs or using a DHT prefix
-    /// query. For now, this is a simplified implementation that expects the
-    /// caller to provide candidate node IDs.
-    async fn discover_proxy_dht(&self) -> Result<Vec<ProxyRecord>, DhtError> {
-        // TODO: Implement full proxy discovery via DHT.
-        // In production, this would:
-        // 1. Query the DHT for all keys matching "masque-proxy:*" prefix
-        // 2. Filter out expired records
-        // 3. Filter out full-capacity proxies
-        // 4. Measure latency to top candidates
-        // 5. Return sorted by latency
-        //
-        // For now, return empty to exercise fallback path.
-        warn!("DHT proxy discovery not fully implemented");
-        Ok(Vec::new())
+    /// Since libp2p KadDHT doesn't natively support prefix queries,
+    /// this method requires a list of known proxy node IDs to look up.
+    /// Each node ID is used to compute the DHT key
+    /// `SHA-256("masque-proxy:{node_id}")` and fetch the corresponding
+    /// `ProxyRecord`.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_ids` - Slice of known proxy node IDs to look up in the DHT.
+    ///
+    /// # Returns
+    ///
+    /// A vector of valid, non-expired `ProxyRecord`s. Lookup failures for
+    /// individual node IDs are silently skipped (logged as warnings).
+    async fn discover_proxy_dht(&self, node_ids: &[String]) -> Result<Vec<ProxyRecord>, DhtError> {
+        let mut proxies = Vec::new();
+
+        for node_id in node_ids {
+            debug!(node_id, "Looking up proxy record in DHT");
+            match self.dht_node.get_proxy_record(node_id).await {
+                Ok(data) => {
+                    match ProxyRecord::decode(&data) {
+                        Ok(record) => {
+                            if record.is_expired() {
+                                warn!(
+                                    node_id,
+                                    expired_at = record.timestamp + record.ttl_seconds as u64,
+                                    "Proxy record expired, skipping"
+                                );
+                                continue;
+                            }
+                            debug!(
+                                node_id,
+                                region = %record.region,
+                                latency_ms = record.latency_hint_ms,
+                                "Found proxy record via DHT"
+                            );
+                            proxies.push(record);
+                        }
+                        Err(e) => {
+                            warn!(node_id, error = %e, "Failed to decode proxy record from DHT");
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug!(node_id, error = %e, "Proxy record not found in DHT for node");
+                }
+            }
+        }
+
+        // Sort by latency hint (lowest first) per spec §6.8.2.
+        proxies.sort_by_key(|p| p.latency_hint_ms);
+
+        Ok(proxies)
     }
 
     /// Discover proxies via the signaling server.
@@ -436,20 +725,35 @@ impl DiscoveryService {
     /// Publish a PeerRecord to the DHT.
     ///
     /// Also publishes the corresponding UsernameRecord if the record
-    /// has a display_name set.
+    /// has a display_name set. The UsernameRecord is signed with the
+    /// provided signing key before publishing, as required by the spec
+    /// for record authenticity verification.
+    ///
+    /// # Arguments
+    ///
+    /// * `record` - The peer record to publish.
+    /// * `signing_key` - The Ed25519 signing key used to sign the UsernameRecord.
+    ///
+    /// # Security
+    ///
+    /// Per spec §6.2.5, the username record MUST be signed before publishing.
+    /// Unsigned records will be rejected by verifiers.
     pub async fn publish_peer_record(
         &self,
         record: &PeerRecord,
+        signing_key: &SigningKey,
     ) -> Result<(), DhtError> {
         let data = record.encode()?;
         self.dht_node.put_peer_record(&record.peer_id, &data).await?;
 
         // Also publish the username mapping if display_name is set.
         if !record.display_name.is_empty() {
-            let username_record =
+            let mut username_record =
                 UsernameRecord::new_unsigned(record.display_name.clone(), record.peer_id.clone());
-            // Note: In production, the username record must be signed by the
-            // same key as the peer record. The signing key would be passed in.
+            // Per spec §6.2.5: the username record must be signed with the
+            // peer's Ed25519 key before publishing. This ensures that other
+            // nodes can verify the username → peer_id mapping is authentic.
+            username_record.sign(signing_key)?;
             let username_data = username_record.encode()?;
             self.dht_node
                 .put_username_record(&record.display_name, &username_data)

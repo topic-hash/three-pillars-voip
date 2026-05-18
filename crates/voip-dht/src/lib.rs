@@ -34,6 +34,7 @@ pub use record::{
     peer_record_key, username_record_key, proxy_record_key,
     sign_peer_record, verify_peer_record,
     sign_proxy_record, verify_proxy_record,
+    sign_username_record, verify_username_record,
     PeerRecord, UsernameRecord, ProxyRecord,
     NatInfo, NatType, PortPrediction, PredictionConfidence,
     TrackAnnouncement, MediaType, PeerStatus,

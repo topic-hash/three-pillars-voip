@@ -9,6 +9,7 @@
 //!   - QUIC listener on 5 IPs for path probing (placeholder)
 //!   - Graceful shutdown via tokio signal
 
+mod auth;
 mod error;
 mod handlers;
 mod jwt;

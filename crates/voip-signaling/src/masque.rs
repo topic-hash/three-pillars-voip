@@ -9,18 +9,29 @@ use voip_core::types::NATType;
 use crate::error::SignalingError;
 use crate::state::AppState;
 
-/// Detect whether MASQUE relay is needed based on both peers' NAT types.
+/// Detect whether MASQUE relay is needed based on both peers' NAT types
+/// and whether UDP is blocked.
 ///
-/// Per spec/06 §6.7 Step 9: MASQUE relay is needed when both peers
-/// have NAT_SYMMETRIC_RANDOM (direct connection impossible).
-/// Also needed when UDP is blocked on both sides.
+/// Per spec/06 §6.7 Step 9 and spec/12: MASQUE relay is needed when:
+/// - Both peers have NAT_SYMMETRIC_RANDOM (direct connection impossible), OR
+/// - UDP is blocked on the network path
+///
+/// # Arguments
+///
+/// * `caller_nat` - The caller's detected NAT type
+/// * `callee_nat` - The callee's detected NAT type
+/// * `udp_blocked` - Whether UDP is blocked on the network path
+///
+/// # Returns
+///
+/// `true` if MASQUE relay is needed, `false` otherwise.
 #[allow(dead_code)]
-pub fn detect_masque_need(caller_nat: NATType, callee_nat: NATType) -> bool {
+pub fn detect_masque_need(caller_nat: NATType, callee_nat: NATType, udp_blocked: bool) -> bool {
     // Both peers have symmetric NAT with random port allocation
     matches!(
         (caller_nat, callee_nat),
         (NATType::SymmetricRandom, NATType::SymmetricRandom)
-    )
+    ) || udp_blocked
 }
 
 /// Select the least-loaded MASQUE proxy from the known list.
@@ -82,25 +93,27 @@ mod tests {
     fn test_detect_masque_need_both_random() {
         assert!(detect_masque_need(
             NATType::SymmetricRandom,
-            NATType::SymmetricRandom
+            NATType::SymmetricRandom,
+            false
         ));
     }
 
     #[test]
     fn test_detect_masque_not_needed_cone() {
-        assert!(!detect_masque_need(NATType::Cone, NATType::Cone));
+        assert!(!detect_masque_need(NATType::Cone, NATType::Cone, false));
     }
 
     #[test]
     fn test_detect_masque_not_needed_ipv6() {
-        assert!(!detect_masque_need(NATType::None, NATType::None));
+        assert!(!detect_masque_need(NATType::None, NATType::None, false));
     }
 
     #[test]
     fn test_detect_masque_not_needed_one_random() {
         assert!(!detect_masque_need(
             NATType::SymmetricRandom,
-            NATType::Cone
+            NATType::Cone,
+            false
         ));
     }
 
@@ -108,7 +121,8 @@ mod tests {
     fn test_detect_masque_not_needed_sequential() {
         assert!(!detect_masque_need(
             NATType::SymmetricSequential,
-            NATType::SymmetricSequential
+            NATType::SymmetricSequential,
+            false
         ));
     }
 
@@ -116,7 +130,31 @@ mod tests {
     fn test_detect_masque_not_needed_mixed() {
         assert!(!detect_masque_need(
             NATType::SymmetricPseudo,
-            NATType::SymmetricRandom
+            NATType::SymmetricRandom,
+            false
+        ));
+    }
+
+    #[test]
+    fn test_detect_masque_need_udp_blocked() {
+        // UDP blocked triggers MASQUE need regardless of NAT types
+        assert!(detect_masque_need(NATType::None, NATType::None, true));
+        assert!(detect_masque_need(NATType::Cone, NATType::Cone, true));
+        assert!(detect_masque_need(
+            NATType::SymmetricRandom,
+            NATType::Cone,
+            true
+        ));
+    }
+
+    #[test]
+    fn test_detect_masque_not_needed_udp_not_blocked() {
+        // With UDP not blocked and non-SymmetricRandom pair, no MASQUE needed
+        assert!(!detect_masque_need(NATType::Cone, NATType::None, false));
+        assert!(!detect_masque_need(
+            NATType::SymmetricPseudo,
+            NATType::SymmetricPseudo,
+            false
         ));
     }
 }

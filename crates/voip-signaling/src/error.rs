@@ -21,16 +21,28 @@ pub mod codes {
     pub const INVALID_CALL_ID: u32 = 1003;
     pub const CALL_ALREADY_EXISTS: u32 = 1004;
     pub const NOT_CALL_PARTICIPANT: u32 = 1005;
+    /// A peer tried to register with a peer_id already in use by a different WS session.
+    /// Per spec/08 §8.5.
+    pub const PEER_ALREADY_REGISTERED: u32 = 1006;
 
     // Rate-limit / auth errors (2xxx)
     pub const RATE_LIMITED: u32 = 2001;
     pub const INVALID_JWT: u32 = 2002;
     pub const INVALID_MESSAGE: u32 = 2003;
+    /// REST endpoint accessed with missing or invalid authentication.
+    /// Per spec/08 §8.5.
+    pub const UNAUTHORIZED: u32 = 2004;
 
     // MASQUE errors (3xxx)
     pub const MASQUE_NO_PROXY: u32 = 3001;
     pub const MASQUE_PROXY_TIMEOUT: u32 = 3002;
     pub const MASQUE_COORDINATION_FAILED: u32 = 3003;
+    /// Proxy token is invalid or malformed.
+    /// Per spec/08 §8.5.
+    pub const PROXY_TOKEN_INVALID: u32 = 3004;
+    /// Proxy token has expired.
+    /// Per spec/08 §8.5.
+    pub const PROXY_TOKEN_EXPIRED: u32 = 3005;
 
     // Internal
     pub const INTERNAL_ERROR: u32 = 9999;
@@ -64,6 +76,10 @@ pub enum SignalingError {
     #[error("not a call participant: {0}")]
     NotCallParticipant(String),
 
+    /// A peer tried to register with a peer_id already in use by a different WS session.
+    #[error("peer already registered: {0}")]
+    PeerAlreadyRegistered(String),
+
     #[error("rate limited")]
     RateLimited,
 
@@ -73,6 +89,10 @@ pub enum SignalingError {
     #[error("invalid message: {0}")]
     InvalidMessage(String),
 
+    /// REST endpoint accessed with missing or invalid authentication.
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
     #[error("MASQUE no proxy available")]
     MasqueNoProxy,
 
@@ -81,6 +101,14 @@ pub enum SignalingError {
 
     #[error("MASQUE coordination failed")]
     MasqueCoordinationFailed,
+
+    /// Proxy token is invalid or malformed.
+    #[error("proxy token invalid: {0}")]
+    ProxyTokenInvalid(String),
+
+    /// Proxy token has expired.
+    #[error("proxy token expired: {0}")]
+    ProxyTokenExpired(String),
 
     #[error("internal error: {0}")]
     Internal(String),
@@ -95,12 +123,16 @@ impl SignalingError {
             Self::InvalidCallId(_) => codes::INVALID_CALL_ID,
             Self::CallAlreadyExists(_) => codes::CALL_ALREADY_EXISTS,
             Self::NotCallParticipant(_) => codes::NOT_CALL_PARTICIPANT,
+            Self::PeerAlreadyRegistered(_) => codes::PEER_ALREADY_REGISTERED,
             Self::RateLimited => codes::RATE_LIMITED,
             Self::InvalidJwt(_) => codes::INVALID_JWT,
             Self::InvalidMessage(_) => codes::INVALID_MESSAGE,
+            Self::Unauthorized(_) => codes::UNAUTHORIZED,
             Self::MasqueNoProxy => codes::MASQUE_NO_PROXY,
             Self::MasqueProxyTimeout => codes::MASQUE_PROXY_TIMEOUT,
             Self::MasqueCoordinationFailed => codes::MASQUE_COORDINATION_FAILED,
+            Self::ProxyTokenInvalid(_) => codes::PROXY_TOKEN_INVALID,
+            Self::ProxyTokenExpired(_) => codes::PROXY_TOKEN_EXPIRED,
             Self::Internal(_) => codes::INTERNAL_ERROR,
         }
     }
@@ -110,13 +142,15 @@ impl SignalingError {
         match self {
             Self::UnknownPeer(_) | Self::PeerOffline(_) => StatusCode::NOT_FOUND,
             Self::InvalidCallId(_) | Self::InvalidMessage(_) => StatusCode::BAD_REQUEST,
-            Self::CallAlreadyExists(_) => StatusCode::CONFLICT,
+            Self::CallAlreadyExists(_) | Self::PeerAlreadyRegistered(_) => StatusCode::CONFLICT,
             Self::NotCallParticipant(_) => StatusCode::FORBIDDEN,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
-            Self::InvalidJwt(_) => StatusCode::UNAUTHORIZED,
+            Self::InvalidJwt(_) | Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::MasqueNoProxy | Self::MasqueProxyTimeout | Self::MasqueCoordinationFailed => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
+            Self::ProxyTokenInvalid(_) => StatusCode::BAD_REQUEST,
+            Self::ProxyTokenExpired(_) => StatusCode::UNAUTHORIZED,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

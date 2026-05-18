@@ -143,6 +143,10 @@ pub enum DhtError {
     /// Core error propagation.
     #[error(transparent)]
     Core(#[from] voip_core::VoipError),
+
+    /// An HTTP request to the signaling server failed.
+    #[error("HTTP error: {0}")]
+    Http(String),
 }
 
 impl DhtError {

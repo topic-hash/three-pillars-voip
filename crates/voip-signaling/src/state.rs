@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info};
 
 use crate::error::SignalingError;
+use crate::push::PushNotifier;
 use crate::rate_limit::{RateLimitConfig, RateLimiter};
 use voip_core::VoIPConfig;
 
@@ -167,11 +168,13 @@ pub struct InnerState {
     pub config: VoIPConfig,
     /// DHT bootstrap node multiaddresses.
     pub dht_bootstrap: RwLock<Vec<String>>,
+    /// Shared push notification notifier (stub mode by default).
+    pub push_notifier: PushNotifier,
 }
 
 impl AppState {
     /// Create a new `AppState` with the given rate-limit config, server IPs,
-    /// signing key, and VoIP config.
+    /// signing key, and VoIP config. The push notifier defaults to stub mode.
     pub fn new(
         rate_limit_config: RateLimitConfig,
         server_ips: Vec<String>,
@@ -189,6 +192,7 @@ impl AppState {
                 signing_key,
                 config,
                 dht_bootstrap: RwLock::new(dht_nodes),
+                push_notifier: PushNotifier::new_stub(),
             }),
         }
     }

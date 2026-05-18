@@ -3,7 +3,7 @@
 //! The `SignalingServer` struct holds shared state and provides a
 //! builder pattern for configuring and launching the signaling server.
 
-use axum::routing::{delete, get, post, put};
+use axum::routing::{get, post};
 use axum::Router;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
@@ -12,6 +12,7 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 use voip_core::VoIPConfig;
 
+use crate::auth;
 use crate::error::ErrorResponse;
 use crate::handlers;
 use crate::handlers::{
@@ -189,26 +190,46 @@ impl SignalingServer {
     }
 
     /// Build the axum router with all routes registered.
+    ///
+    /// Routes are split into:
+    /// - **Public routes** (no auth): `POST /v1/peers`, `GET /v1/openapi.json`,
+    ///   `GET /swagger-ui/*`, `GET /v1/ws`, `GET /v1/myip`
+    /// - **Authenticated routes** (JWT required): all other REST endpoints
+    ///
+    /// Per spec/08 §8.6, JWT auth is required on all REST endpoints except
+    /// the registration endpoint and documentation endpoints.
     pub fn router(&self) -> Router {
+        let auth_middleware = axum::middleware::from_fn_with_state(
+            self.state.clone(),
+            auth::auth_middleware,
+        );
+
+        // All routes on a single router. The auth middleware is applied to
+        // the entire router but internally skips public paths (POST /v1/peers,
+        // GET /v1/myip, GET /v1/ws, documentation). This avoids axum's
+        // state-propagation issues when merging separate sub-routers.
+        //
+        // Note: SwaggerUi must be merged BEFORE .with_state() to avoid
+        // routing conflicts that cause 404s on state-dependent routes.
         Router::new()
-            // ── REST API (spec/08 §8.1.2) ────────────────────────
-            .route("/v1/peers/lookup", get(handlers::lookup_peer))
-            .route("/v1/peers/{peer_id}/status", get(handlers::get_peer_status))
-            .route("/v1/peers/{peer_id}", get(handlers::get_peer))
-            .route("/v1/peers/{peer_id}", put(handlers::update_peer))
-            .route("/v1/peers/{peer_id}", delete(handlers::unregister_peer))
+            .merge(SwaggerUi::new("/swagger-ui").url("/v1/openapi.json", ApiDoc::openapi()))
             .route("/v1/peers", post(handlers::register_peer))
+            .route("/v1/peers/lookup", get(handlers::lookup_peer))
+            .route(
+                "/v1/peers/{peer_id}",
+                get(handlers::get_peer)
+                    .put(handlers::update_peer)
+                    .delete(handlers::unregister_peer),
+            )
+            .route("/v1/peers/{peer_id}/status", get(handlers::get_peer_status))
             .route("/v1/myip", get(handlers::get_my_ip))
+            .route("/v1/ws", get(handlers::ws_upgrade))
             .route("/v1/proxies", get(handlers::get_proxies))
             .route("/v1/dht/bootstrap", get(handlers::dht_bootstrap))
             .route("/v1/proxy-token", post(handlers::issue_proxy_token))
-            // ── WebSocket ─────────────────────────────────────────
-            .route("/v1/ws", get(handlers::ws_upgrade))
-            // ── Shared state ──────────────────────────────────────
+            .layer(auth_middleware)
             .with_state(self.state.clone())
-            // ── OpenAPI / Swagger UI ──────────────────────────────
-            .merge(SwaggerUi::new("/swagger-ui").url("/v1/openapi.json", ApiDoc::openapi()))
-            // ── CORS ──────────────────────────────────────────────
+            // ── CORS ──────────────────────────────────────────────────────
             .layer(CorsLayer::permissive())
     }
 

@@ -13,7 +13,7 @@
 //!   - POST   /v1/proxy-token           — issue ProxyToken
 //!   - GET    /v1/ws                    — WebSocket upgrade
 
-use axum::extract::{ConnectInfo, Path, Query, State};
+use axum::extract::{ConnectInfo, Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use tracing::{debug, info, warn};
 
+use crate::auth::AuthenticatedPeer;
 use crate::error::{ErrorResponse, SignalingError};
 use crate::jwt;
 use crate::session;
@@ -151,6 +152,9 @@ fn peer_status_str(val: i32) -> String {
 /// `POST /v1/peers` — register a new peer.
 ///
 /// Also issues a JWT token for the peer to use for WebSocket auth.
+/// This endpoint does NOT require authentication — it is the entry point
+/// that issues JWTs. The `peer_id` field must be a valid 64-char hex string
+/// representing an Ed25519 public key.
 #[utoipa::path(
     post,
     path = "/v1/peers",
@@ -166,6 +170,18 @@ pub async fn register_peer(
     State(state): State<AppState>,
     Json(body): Json<RegisterPeerRequest>,
 ) -> crate::error::Result<(StatusCode, Json<RegisterPeerResponse>)> {
+    // Validate peer_id is a valid Ed25519 public key hex string (64 chars)
+    voip_core::crypto::parse_peer_id(&body.peer_id).map_err(|e| {
+        debug!(
+            peer_id = %body.peer_id,
+            error = %e,
+            "invalid peer_id: must be 64-char hex Ed25519 public key"
+        );
+        SignalingError::InvalidMessage(
+            "peer_id must be a valid 64-char hex Ed25519 public key".to_owned(),
+        )
+    })?;
+
     // Rate limit registrations
     if !state
         .inner
@@ -224,6 +240,9 @@ pub async fn register_peer(
 }
 
 /// `PUT /v1/peers/{peer_id}` — update peer registration.
+///
+/// Requires JWT authentication. The authenticated peer_id must match
+/// the `{peer_id}` path parameter.
 #[utoipa::path(
     put,
     path = "/v1/peers/{peer_id}",
@@ -237,9 +256,17 @@ pub async fn register_peer(
 )]
 pub async fn update_peer(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthenticatedPeer>,
     Path(peer_id): Path<String>,
     Json(body): Json<RegisterPeerRequest>,
 ) -> crate::error::Result<Json<PeerResponse>> {
+    // Authorization: authenticated peer must match the target peer_id
+    if auth.peer_id != peer_id {
+        return Err(SignalingError::Unauthorized(
+            "authenticated peer_id does not match target".to_owned(),
+        ));
+    }
+
     // Verify peer exists
     let existing = state
         .get_peer(&peer_id)
@@ -303,6 +330,9 @@ pub async fn update_peer(
 }
 
 /// `DELETE /v1/peers/{peer_id}` — unregister a peer.
+///
+/// Requires JWT authentication. The authenticated peer_id must match
+/// the `{peer_id}` path parameter.
 #[utoipa::path(
     delete,
     path = "/v1/peers/{peer_id}",
@@ -314,14 +344,24 @@ pub async fn update_peer(
 )]
 pub async fn unregister_peer(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthenticatedPeer>,
     Path(peer_id): Path<String>,
 ) -> crate::error::Result<StatusCode> {
+    // Authorization: authenticated peer must match the target peer_id
+    if auth.peer_id != peer_id {
+        return Err(SignalingError::Unauthorized(
+            "authenticated peer_id does not match target".to_owned(),
+        ));
+    }
+
     state.unregister_peer(&peer_id).await?;
     info!(peer_id = %peer_id, "peer deleted via REST");
     Ok(StatusCode::NO_CONTENT)
 }
 
 /// `GET /v1/peers/{peer_id}` — peer lookup.
+///
+/// Requires JWT authentication.
 #[utoipa::path(
     get,
     path = "/v1/peers/{peer_id}",
@@ -333,6 +373,7 @@ pub async fn unregister_peer(
 )]
 pub async fn get_peer(
     State(state): State<AppState>,
+    Extension(_auth): Extension<AuthenticatedPeer>,
     Path(peer_id): Path<String>,
 ) -> crate::error::Result<Json<PeerResponse>> {
     let info = state
@@ -352,6 +393,8 @@ pub async fn get_peer(
 }
 
 /// `GET /v1/peers/{peer_id}/status` — peer online status.
+///
+/// Requires JWT authentication.
 #[utoipa::path(
     get,
     path = "/v1/peers/{peer_id}/status",
@@ -363,6 +406,7 @@ pub async fn get_peer(
 )]
 pub async fn get_peer_status(
     State(state): State<AppState>,
+    Extension(_auth): Extension<AuthenticatedPeer>,
     Path(peer_id): Path<String>,
 ) -> crate::error::Result<Json<PeerStatusResponse>> {
     let info = state
@@ -377,6 +421,8 @@ pub async fn get_peer_status(
 }
 
 /// `GET /v1/peers/lookup?username={name}` — resolve username to peer_id.
+///
+/// Requires JWT authentication.
 #[utoipa::path(
     get,
     path = "/v1/peers/lookup",
@@ -389,6 +435,7 @@ pub async fn get_peer_status(
 )]
 pub async fn lookup_peer(
     State(state): State<AppState>,
+    Extension(_auth): Extension<AuthenticatedPeer>,
     Query(query): Query<LookupQuery>,
 ) -> crate::error::Result<Json<LookupResponse>> {
     // Search through peers by display_name (case-insensitive exact match).
@@ -439,6 +486,8 @@ pub async fn get_my_ip(
 ///
 /// Per spec/06 §6.8.3: Returns list of known MASQUE proxy addresses.
 /// Proxies returned by the signaling server are guaranteed reachable.
+///
+/// Requires JWT authentication.
 #[utoipa::path(
     get,
     path = "/v1/proxies",
@@ -449,6 +498,7 @@ pub async fn get_my_ip(
 )]
 pub async fn get_proxies(
     State(state): State<AppState>,
+    Extension(_auth): Extension<AuthenticatedPeer>,
 ) -> Json<ProxyResponse> {
     let proxies = state.get_proxies().await;
     Json(ProxyResponse {
@@ -469,6 +519,8 @@ pub async fn get_proxies(
 ///
 /// Per spec/06 §6.2.3: Returns active DHT node multiaddresses for bootstrap.
 /// Fallback: hardcoded seed nodes from app binary.
+///
+/// Requires JWT authentication.
 #[utoipa::path(
     get,
     path = "/v1/dht/bootstrap",
@@ -479,6 +531,7 @@ pub async fn get_proxies(
 )]
 pub async fn dht_bootstrap(
     State(state): State<AppState>,
+    Extension(_auth): Extension<AuthenticatedPeer>,
 ) -> Json<DhtBootstrapResponse> {
     let nodes = state.get_dht_bootstrap().await;
     Json(DhtBootstrapResponse { nodes })
@@ -489,6 +542,8 @@ pub async fn dht_bootstrap(
 /// Per spec/08 §8.1.2 and signaling.proto ProxyToken message:
 /// Signs a ProxyToken with the server's Ed25519 private key.
 /// The token is presented to the MASQUE proxy for anti-abuse verification.
+///
+/// Requires JWT authentication.
 #[utoipa::path(
     post,
     path = "/v1/proxy-token",
@@ -501,6 +556,7 @@ pub async fn dht_bootstrap(
 )]
 pub async fn issue_proxy_token(
     State(state): State<AppState>,
+    Extension(_auth): Extension<AuthenticatedPeer>,
     Json(body): Json<ProxyTokenRequest>,
 ) -> crate::error::Result<Json<ProxyTokenResponse>> {
     // Verify both peers exist

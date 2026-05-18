@@ -614,6 +614,97 @@ pub fn verify_proxy_record(
 }
 
 // ---------------------------------------------------------------------------
+// Standalone signing/verification functions for UsernameRecord
+// ---------------------------------------------------------------------------
+
+/// Sign a `UsernameRecord` with the given Ed25519 signing key.
+///
+/// The signature covers the bytes of `{username}:{peer_id}`.
+/// After calling this function, the record's `signature` field will be
+/// set to the Ed25519 signature bytes.
+///
+/// # Arguments
+///
+/// * `record` - The username record to sign. Its `signature` field will be set.
+/// * `signing_key` - The Ed25519 private key used to produce the signature.
+///
+/// # Errors
+///
+/// Returns `DhtError::Serialization` if the signing input cannot be constructed.
+///
+/// # Example
+///
+/// ```ignore
+/// use voip_dht::record::{UsernameRecord, sign_username_record};
+/// use ed25519_dalek::SigningKey;
+///
+/// let mut record = UsernameRecord::new_unsigned("alice".into(), "peer-123".into());
+/// sign_username_record(&mut record, &signing_key).unwrap();
+/// assert!(!record.signature.is_empty());
+/// ```
+pub fn sign_username_record(
+    record: &mut UsernameRecord,
+    signing_key: &SigningKey,
+) -> Result<(), DhtError> {
+    let message = username_signing_input(&record.username, &record.peer_id);
+    let signature = signing_key.sign(&message);
+    record.signature = signature.to_bytes().to_vec();
+    Ok(())
+}
+
+/// Verify a `UsernameRecord`'s Ed25519 signature against the given public key.
+///
+/// The verification process reconstructs the signing input `{username}:{peer_id}`
+/// and verifies the Ed25519 signature against it.
+///
+/// # Arguments
+///
+/// * `record` - The username record whose signature should be verified.
+/// * `verifying_key` - The Ed25519 public key to verify against.
+///
+/// # Returns
+///
+/// * `Ok(true)` — The signature is valid.
+/// * `Ok(false)` — The signature is invalid.
+/// * `Err(DhtError)` — The signature is empty or malformed.
+///
+/// # Example
+///
+/// ```ignore
+/// use voip_dht::record::{UsernameRecord, sign_username_record, verify_username_record};
+/// use ed25519_dalek::{SigningKey, VerifyingKey};
+///
+/// let verifying_key = signing_key.verifying_key();
+/// let valid = verify_username_record(&record, &verifying_key).unwrap();
+/// assert!(valid);
+/// ```
+pub fn verify_username_record(
+    record: &UsernameRecord,
+    verifying_key: &VerifyingKey,
+) -> Result<bool, DhtError> {
+    if record.signature.is_empty() {
+        return Err(DhtError::invalid_signature("UsernameRecord"));
+    }
+
+    let message = username_signing_input(&record.username, &record.peer_id);
+    let signature = Signature::try_from(record.signature.as_slice())
+        .map_err(|e| DhtError::InvalidSignatureLegacy {
+            record_type: format!("UsernameRecord: {e}"),
+        })?;
+
+    Ok(verifying_key.verify(&message, &signature).is_ok())
+}
+
+/// Build the signing input for a username record: `{username}:{peer_id}`.
+///
+/// This is the canonical form that gets signed and verified. The colon
+/// separator ensures no ambiguity between different username/peer_id
+/// pairs that could otherwise collide when concatenated.
+fn username_signing_input(username: &str, peer_id: &str) -> Vec<u8> {
+    format!("{username}:{peer_id}").into_bytes()
+}
+
+// ---------------------------------------------------------------------------
 // UsernameRecord
 // ---------------------------------------------------------------------------
 
@@ -1004,5 +1095,32 @@ mod tests {
         sign_proxy_record(&mut proto_record, &signing_key).unwrap();
         let valid = verify_proxy_record(&proto_record, &verifying_key).unwrap();
         assert!(valid);
+    }
+
+    #[test]
+    fn test_sign_verify_standalone_username_record() {
+        let mut csprng = rand::rngs::OsRng;
+        let signing_key = SigningKey::generate(&mut csprng);
+        let verifying_key = signing_key.verifying_key();
+
+        let mut record = UsernameRecord::new_unsigned("bob".to_string(), "peer-789".to_string());
+
+        // Should fail verification before signing (empty signature).
+        assert!(verify_username_record(&record, &verifying_key).is_err());
+
+        // Sign using the standalone function.
+        sign_username_record(&mut record, &signing_key).unwrap();
+        assert!(!record.signature.is_empty());
+
+        // Verify using the standalone function.
+        let valid = verify_username_record(&record, &verifying_key).unwrap();
+        assert!(valid);
+
+        // Verify with wrong key should fail.
+        let mut other_csprng = rand::rngs::OsRng;
+        let other_key = SigningKey::generate(&mut other_csprng);
+        let other_verifying_key = other_key.verifying_key();
+        let valid_wrong_key = verify_username_record(&record, &other_verifying_key).unwrap();
+        assert!(!valid_wrong_key);
     }
 }
