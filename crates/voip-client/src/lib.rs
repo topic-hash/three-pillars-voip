@@ -34,6 +34,7 @@ pub mod pipeline;
 pub mod probe;
 pub mod proxy;
 pub mod push_retry;
+pub mod session_store;
 pub mod signaling_client;
 pub mod tls;
 

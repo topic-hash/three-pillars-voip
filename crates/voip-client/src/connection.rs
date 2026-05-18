@@ -13,6 +13,20 @@
 //! - Decides which method to try based on the decision tree
 //! - Manages the QUIC connection lifecycle
 //! - Reports ConnectionMethod on success, or CallEndReason on failure
+//!
+//! # Happy Eyeballs v2 (ROADMAP 3.10)
+//!
+//! When both IPv6 and IPv4 addresses are available for a peer, the client
+//! attempts IPv6 connections first with a 25ms head start before starting
+//! IPv4 attempts, per RFC 8305 / ROADMAP 3.10. All attempts race against
+//! each other; the first successful connection wins.
+//!
+//! # Simultaneous Open (ROADMAP 3.9)
+//!
+//! For peers behind Cone NAT, both connect AND accept run in parallel.
+//! Per spec/09 §9.2: both peers send PATH_CHALLENGE to each other's
+//! reflexive addresses. The endpoint accepts incoming connections while
+//! simultaneously trying to connect outbound.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -33,6 +47,14 @@ use crate::masque::MasqueTunnel;
 use crate::migration::ConnectionMigrator;
 use crate::nat_probe::NATProber;
 use crate::probe::PortPredictionProber;
+
+/// Default QUIC server name for TLS SNI when connecting to a peer.
+const DEFAULT_SERVER_NAME: &str = "voip-peer";
+
+/// Happy Eyeballs v2 delay: IPv6 gets this head start before IPv4 starts.
+/// Per RFC 8305 §8: the recommended delay is 250ms, but for local/LAN
+/// scenarios with low RTT, 25ms is sufficient (ROADMAP 3.10).
+const HAPPY_EYEBALLS_IPV6_HEAD_START: Duration = Duration::from_millis(25);
 
 /// Helper: extract NATInfo from an optional proto NatInfo.
 fn proto_nat_info_to_native(proto: Option<&ProtoNatInfo>) -> NATInfo {
@@ -97,6 +119,235 @@ impl VoipConnection {
     }
 }
 
+// ==================== Happy Eyeballs v2 (ROADMAP 3.10) ====================
+
+/// Attempt connection with Happy Eyeballs v2: IPv6 gets a head start.
+///
+/// Per ROADMAP 3.10 / RFC 8305: when both IPv6 and IPv4 addresses are
+/// available, start IPv6 connection attempts first, then after a 25ms
+/// delay start IPv4 attempts. All attempts race; the first success wins.
+///
+/// This compensates for Quinn's built-in Happy Eyeballs only working
+/// when connecting via hostname (DNS returns both A and AAAA records).
+/// Since we have pre-resolved addresses, we implement the racing manually.
+///
+/// # Arguments
+///
+/// * `endpoint` - The QUIC endpoint to use for connections.
+/// * `ipv6_addrs` - Pre-resolved IPv6 socket addresses (tried first).
+/// * `ipv4_addrs` - Pre-resolved IPv4 socket addresses (tried after head start).
+/// * `server_name` - TLS SNI server name.
+/// * `timeout` - Per-connection attempt timeout.
+///
+/// # Returns
+///
+/// The first successful QUIC connection, or an error if all attempts fail.
+pub async fn happy_eyeballs_connect(
+    endpoint: &Endpoint,
+    ipv6_addrs: &[SocketAddr],
+    ipv4_addrs: &[SocketAddr],
+    server_name: &str,
+    timeout: Duration,
+) -> Result<Connection, ConnectError> {
+    use tokio::task::JoinSet;
+
+    let mut attempts: JoinSet<Result<Connection, ConnectError>> = JoinSet::new();
+
+    // Start IPv6 attempts first
+    for &addr in ipv6_addrs {
+        let ep = endpoint.clone();
+        let sn = server_name.to_string();
+        attempts.spawn(async move {
+            connect_with_timeout(ep, addr, sn, timeout).await
+        });
+    }
+
+    // Wait the IPv6 head-start delay before starting IPv4 attempts
+    tokio::time::sleep(HAPPY_EYEBALLS_IPV6_HEAD_START).await;
+
+    // Start IPv4 attempts
+    for &addr in ipv4_addrs {
+        let ep = endpoint.clone();
+        let sn = server_name.to_string();
+        attempts.spawn(async move {
+            connect_with_timeout(ep, addr, sn, timeout).await
+        });
+    }
+
+    // Race all attempts: return first success, or last error if all fail
+    let mut last_error = ConnectError::NetworkError("no addresses to connect".to_string());
+
+    while let Some(result) = attempts.join_next().await {
+        match result {
+            Ok(Ok(conn)) => {
+                // First success wins — abort remaining attempts
+                attempts.abort_all();
+                return Ok(conn);
+            }
+            Ok(Err(e)) => {
+                debug!(error = %e, "Connection attempt failed");
+                last_error = e;
+            }
+            Err(e) => {
+                // JoinError (task cancelled/panicked)
+                debug!(error = %e, "Connection task failed");
+                last_error = ConnectError::NetworkError(format!("task error: {}", e));
+            }
+        }
+    }
+
+    Err(last_error)
+}
+
+/// Connect to a single address with a timeout.
+///
+/// This is a helper for [`happy_eyeballs_connect`] that wraps a single
+/// QUIC connection attempt with a timeout.
+async fn connect_with_timeout(
+    endpoint: Endpoint,
+    addr: SocketAddr,
+    server_name: String,
+    timeout: Duration,
+) -> Result<Connection, ConnectError> {
+    let connecting = endpoint
+        .connect(addr, &server_name)
+        .map_err(|e| ConnectError::NetworkError(e.to_string()))?;
+
+    tokio::time::timeout(timeout, connecting)
+        .await
+        .map_err(|_| ConnectError::QuicTimeout(timeout.as_millis() as u64))?
+        .map_err(ConnectError::QuicError)
+}
+
+// ==================== Simultaneous Open (ROADMAP 3.9) ====================
+
+/// Attempt QUIC simultaneous open: both connect and accept in parallel.
+///
+/// Per spec/09 §9.2 and ROADMAP 3.9: both peers send PATH_CHALLENGE to
+/// each other's reflexive addresses. For true simultaneous open, the
+/// endpoint must be able to accept incoming connections AND initiate
+/// outgoing connections at the same time.
+///
+/// When a peer behind Cone NAT sends PATH_CHALLENGE, the other peer's
+/// listening endpoint can accept the connection. This method races both
+/// the outgoing connect attempts and the incoming accept in parallel,
+/// returning the first successful connection.
+///
+/// # Arguments
+///
+/// * `endpoint` - The QUIC endpoint (must be able to accept incoming).
+/// * `peer_addrs` - The peer's reflexive addresses to try connecting to.
+/// * `server_name` - TLS SNI server name for outgoing connections.
+/// * `timeout` - Overall timeout for the simultaneous open attempt.
+///
+/// # Returns
+///
+/// The first successful QUIC connection (either from an outgoing connect
+/// or an incoming accept), or an error if all attempts fail.
+pub async fn try_simultaneous_open_full(
+    endpoint: &Endpoint,
+    peer_addrs: &[SocketAddr],
+    server_name: &str,
+    timeout: Duration,
+) -> Result<Connection, ConnectError> {
+    let endpoint = endpoint.clone();
+    let server_name = server_name.to_string();
+    let peer_addrs = peer_addrs.to_vec();
+
+    // Start accept task: listen for incoming connections
+    let accept_endpoint = endpoint.clone();
+    let accept_handle = tokio::spawn(async move {
+        tokio::time::timeout(timeout, async {
+            if let Some(incoming) = accept_endpoint.accept().await {
+                incoming.await.map_err(ConnectError::QuicError)
+            } else {
+                Err(ConnectError::NetworkError("endpoint closed".to_string()))
+            }
+        })
+        .await
+        .map_err(|_| ConnectError::QuicTimeout(timeout.as_millis() as u64))?
+    });
+
+    // Start connect task: try connecting to each peer address
+    let connect_handle = tokio::spawn(async move {
+        for addr in &peer_addrs {
+            match try_connect_single(&endpoint, *addr, &server_name, timeout).await {
+                Ok(conn) => return Ok(conn),
+                Err(e) => {
+                    debug!(addr = %addr, error = %e, "Simultaneous open: connect attempt failed");
+                }
+            }
+        }
+        Err(ConnectError::NetworkError(
+            "all simultaneous open connect attempts failed".to_string(),
+        ))
+    });
+
+    // Race: first completion wins
+    // We use a channel to collect results from both tasks
+    let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+
+    // Forward accept result
+    let tx_accept = tx.clone();
+    let ah = accept_handle;
+    tokio::spawn(async move {
+        let result = ah.await;
+        let _ = tx_accept.send(result).await;
+    });
+
+    // Forward connect result
+    let tx_connect = tx.clone();
+    let ch = connect_handle;
+    tokio::spawn(async move {
+        let result = ch.await;
+        let _ = tx_connect.send(result).await;
+    });
+
+    // Drop the original sender so rx sees closure when both forwarders finish
+    drop(tx);
+
+    // Collect results: return first success, or last error
+    let mut last_error = ConnectError::NetworkError("simultaneous open failed".to_string());
+
+    while let Some(result) = rx.recv().await {
+        match result {
+            Ok(Ok(conn)) => {
+                info!("Simultaneous open: connection established");
+                return Ok(conn);
+            }
+            Ok(Err(e)) => {
+                debug!(error = %e, "Simultaneous open: one side failed");
+                last_error = e;
+            }
+            Err(e) => {
+                debug!(error = %e, "Simultaneous open: task join error");
+                last_error = ConnectError::NetworkError(format!("task error: {}", e));
+            }
+        }
+    }
+
+    Err(last_error)
+}
+
+/// Attempt a single QUIC connection with timeout.
+///
+/// Helper for simultaneous open that tries connecting to one address.
+async fn try_connect_single(
+    endpoint: &Endpoint,
+    addr: SocketAddr,
+    server_name: &str,
+    timeout: Duration,
+) -> Result<Connection, ConnectError> {
+    let connecting = endpoint
+        .connect(addr, server_name)
+        .map_err(|e| ConnectError::NetworkError(e.to_string()))?;
+
+    tokio::time::timeout(timeout, connecting)
+        .await
+        .map_err(|_| ConnectError::QuicTimeout(timeout.as_millis() as u64))?
+        .map_err(ConnectError::QuicError)
+}
+
 /// The main connection manager that implements the fallback chain.
 pub struct ConnectionManager {
     /// QUIC endpoint for outgoing connections
@@ -137,7 +388,7 @@ impl ConnectionManager {
             endpoint,
             prediction_prober: PortPredictionProber::new(config.clone()),
             migrator: ConnectionMigrator::new(config.clone()),
-            config: config,
+            config,
             nat_prober: Arc::new(RwLock::new(None)),
             local_nat_info: Arc::new(RwLock::new(None)),
             udp_blocked: Arc::new(RwLock::new(false)),
@@ -202,12 +453,22 @@ impl ConnectionManager {
             "Starting connection establishment"
         );
 
-        // Step 1: IPv6 Direct
-        // If both peers have IPv6 addresses, try direct connection first.
+        // Step 1: IPv6 Direct (with Happy Eyeballs v2 when both IPv6+IPv4 available)
+        // If the peer has IPv6 addresses, try direct connection first.
         if !peer.ipv6_addresses.is_empty() && !udp_blocked {
-            if let Some(conn) = self.try_ipv6_direct(peer).await {
-                info!(method = ?ConnectionMethod::Ipv6Direct, "Connected via IPv6 Direct");
-                return Ok(conn);
+            // If the peer also has IPv4 addresses, use Happy Eyeballs v2
+            // to race IPv6 and IPv4 connections (ROADMAP 3.10).
+            if !peer.ipv4_reflexive.is_empty() {
+                if let Some(conn) = self.try_happy_eyeballs(peer).await {
+                    info!(method = ?ConnectionMethod::Ipv6Direct, "Connected via Happy Eyeballs v2");
+                    return Ok(conn);
+                }
+            } else {
+                // IPv6 only
+                if let Some(conn) = self.try_ipv6_direct(peer).await {
+                    info!(method = ?ConnectionMethod::Ipv6Direct, "Connected via IPv6 Direct");
+                    return Ok(conn);
+                }
             }
         }
 
@@ -303,7 +564,65 @@ impl ConnectionManager {
         Err(ConnectError::AllMethodsFailed)
     }
 
-    /// Step 1: Try IPv6 direct connection.
+    /// Step 1a: Try IPv6 direct connection using Happy Eyeballs v2.
+    ///
+    /// Per ROADMAP 3.10 / RFC 8305: IPv6 addresses get a 25ms head start
+    /// before IPv4 attempts begin. All attempts race; first success wins.
+    ///
+    /// This is used when the peer has both IPv6 and IPv4 addresses available,
+    /// ensuring we prefer IPv6 (faster, no NAT) while falling back to IPv4
+    /// quickly if IPv6 is unreachable.
+    async fn try_happy_eyeballs(&self, peer: &PeerRecord) -> Option<VoipConnection> {
+        let ipv6_addrs: Vec<SocketAddr> = peer
+            .ipv6_addresses
+            .iter()
+            .filter_map(|s| s.parse::<SocketAddr>().ok())
+            .collect();
+
+        let ipv4_addrs: Vec<SocketAddr> = peer
+            .ipv4_reflexive
+            .iter()
+            .filter_map(|s| s.parse::<SocketAddr>().ok())
+            .collect();
+
+        if ipv6_addrs.is_empty() && ipv4_addrs.is_empty() {
+            return None;
+        }
+
+        let timeout = Duration::from_millis(self.config.quic_connect_timeout_ms);
+
+        match happy_eyeballs_connect(
+            &self.endpoint,
+            &ipv6_addrs,
+            &ipv4_addrs,
+            DEFAULT_SERVER_NAME,
+            timeout,
+        )
+        .await
+        {
+            Ok(conn) => {
+                // Determine method based on which address family connected
+                let remote = conn.remote_address();
+                let method = if remote.is_ipv6() {
+                    ConnectionMethod::Ipv6Direct
+                } else {
+                    ConnectionMethod::Ipv4Cone
+                };
+                info!(
+                    remote_addr = %remote,
+                    method = ?method,
+                    "Happy Eyeballs connection succeeded"
+                );
+                Some(VoipConnection::new_direct(conn, method))
+            }
+            Err(e) => {
+                debug!(error = %e, "Happy Eyeballs connection failed");
+                None
+            }
+        }
+    }
+
+    /// Step 1b: Try IPv6 direct connection (IPv6 only, no Happy Eyeballs).
     ///
     /// Both peers must have IPv6 addresses. The QUIC endpoint will use
     /// Happy Eyeballs v2 (built into quinn) to try IPv6 first.
@@ -339,45 +658,81 @@ impl ConnectionManager {
     /// Per spec/09 §9.2: Both peers send QUIC PATH_CHALLENGE to each other's
     /// reflexive addresses. Cone NAT allows inbound from any destination,
     /// so the PATH_CHALLENGE arrives and the peer responds.
+    ///
+    /// Per ROADMAP 3.9: this method starts a background accept task in
+    /// parallel with the connect attempts. When a peer behind Cone NAT
+    /// sends PATH_CHALLENGE, the other peer's listening endpoint can
+    /// accept the connection.
     async fn try_simultaneous_open(
         &self,
         peer: &PeerRecord,
         _connection_id: &[u8],
     ) -> Option<VoipConnection> {
-        for addr_str in &peer.ipv4_reflexive {
-            match addr_str.parse::<SocketAddr>() {
-                Ok(addr) => {
-                    // Attempt QUIC connection to the peer's reflexive address
-                    // using the pre-agreed Connection ID
-                    match self
-                        .try_quic_connect(addr, self.config.quic_connect_timeout_ms)
-                        .await
-                    {
-                        Ok(conn) => {
-                            info!(
-                                addr = %addr,
-                                "QUIC simultaneous open succeeded (Cone NAT)"
-                            );
-                            return Some(VoipConnection::new_direct(
-                                conn,
-                                ConnectionMethod::Ipv4Cone,
-                            ));
-                        }
-                        Err(e) => {
-                            debug!(
-                                addr = %addr,
-                                error = %e,
-                                "QUIC simultaneous open failed for address"
-                            );
+        let peer_addrs: Vec<SocketAddr> = peer
+            .ipv4_reflexive
+            .iter()
+            .filter_map(|s| s.parse::<SocketAddr>().ok())
+            .collect();
+
+        if peer_addrs.is_empty() {
+            return None;
+        }
+
+        let timeout = Duration::from_millis(self.config.quic_connect_timeout_ms);
+
+        // Use the full simultaneous open with both connect and accept
+        match try_simultaneous_open_full(
+            &self.endpoint,
+            &peer_addrs,
+            DEFAULT_SERVER_NAME,
+            timeout,
+        )
+        .await
+        {
+            Ok(conn) => {
+                info!(
+                    "QUIC simultaneous open succeeded (Cone NAT, parallel accept+connect)"
+                );
+                Some(VoipConnection::new_direct(
+                    conn,
+                    ConnectionMethod::Ipv4Cone,
+                ))
+            }
+            Err(e) => {
+                debug!(
+                    error = %e,
+                    "QUIC simultaneous open failed (all connect+accept attempts)"
+                );
+                // Fall back to sequential connect attempts
+                for addr_str in &peer.ipv4_reflexive {
+                    if let Ok(addr) = addr_str.parse::<SocketAddr>() {
+                        match self
+                            .try_quic_connect(addr, self.config.quic_connect_timeout_ms)
+                            .await
+                        {
+                            Ok(conn) => {
+                                info!(
+                                    addr = %addr,
+                                    "QUIC simultaneous open succeeded via fallback (Cone NAT)"
+                                );
+                                return Some(VoipConnection::new_direct(
+                                    conn,
+                                    ConnectionMethod::Ipv4Cone,
+                                ));
+                            }
+                            Err(e) => {
+                                debug!(
+                                    addr = %addr,
+                                    error = %e,
+                                    "QUIC simultaneous open fallback failed for address"
+                                );
+                            }
                         }
                     }
                 }
-                Err(e) => {
-                    debug!(addr = %addr_str, error = %e, "Invalid IPv4 reflexive address");
-                }
+                None
             }
         }
-        None
     }
 
     /// Step 3: Try QUIC port prediction (Symmetric NAT).
@@ -494,12 +849,11 @@ impl ConnectionManager {
         addr: SocketAddr,
         timeout_ms: u64,
     ) -> Result<Connection, ConnectError> {
-        let server_name = "voip-peer"; // QUIC server name for TLS SNI
         let connect_timeout = Duration::from_millis(timeout_ms);
 
         let connecting = self
             .endpoint
-            .connect(addr, server_name)
+            .connect(addr, DEFAULT_SERVER_NAME)
             .map_err(|e| ConnectError::NetworkError(e.to_string()))?;
 
         let connection = tokio::time::timeout(connect_timeout, connecting)
@@ -513,7 +867,7 @@ impl ConnectionManager {
     /// Create a QUIC endpoint for outgoing connections.
     fn create_endpoint() -> Result<Endpoint, ConnectError> {
         let client_config = crate::tls::dangerous_quinn_client_config()
-            .map_err(|e| ConnectError::NetworkError(e))?;
+            .map_err(ConnectError::NetworkError)?;
 
         let mut endpoint = Endpoint::client("[::]:0".parse().unwrap())
             .map_err(|e| ConnectError::NetworkError(e.to_string()))?;
@@ -559,5 +913,20 @@ mod hex {
             s.push(HEX_CHARS[(b & 0x0f) as usize] as char);
         }
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_happy_eyeballs_ipv6_head_start() {
+        assert_eq!(HAPPY_EYEBALLS_IPV6_HEAD_START, Duration::from_millis(25));
+    }
+
+    #[test]
+    fn test_default_server_name() {
+        assert_eq!(DEFAULT_SERVER_NAME, "voip-peer");
     }
 }

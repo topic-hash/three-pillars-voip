@@ -102,3 +102,37 @@ pub fn dangerous_quinn_client_config() -> Result<quinn::ClientConfig, String> {
 
     Ok(client_config)
 }
+
+/// Create a quinn ServerConfig with a self-signed certificate for loopback use.
+///
+/// Used by the HTTP/2 MASQUE loopback QUIC pair to create a local
+/// server endpoint. The self-signed certificate is generated with rcgen
+/// and accepted by the dangerous client verifier.
+///
+/// # Panics
+///
+/// Will not panic — returns errors as `String`.
+pub fn dangerous_quinn_server_config() -> Result<quinn::ServerConfig, String> {
+    // Generate a self-signed certificate for the loopback endpoint
+    let key_pair = rcgen::KeyPair::generate()
+        .map_err(|e| format!("rcgen key pair: {}", e))?;
+
+    let cert = rcgen::CertificateParams::new(vec!["voip-masque-loopback".to_string()])
+        .and_then(|params| params.self_signed(&key_pair))
+        .map_err(|e| format!("rcgen cert: {}", e))?;
+
+    let cert_der = cert.der().to_vec();
+    let key_der = key_pair.serialize_der();
+
+    let rustls_cert = rustls::pki_types::CertificateDer::from(cert_der);
+    let private_key = rustls::pki_types::PrivateKeyDer::try_from(key_der)
+        .map_err(|e| format!("private key: {}", e))?;
+
+    let server_config = quinn::ServerConfig::with_single_cert(
+        vec![rustls_cert],
+        private_key,
+    )
+    .map_err(|e| format!("server config: {}", e))?;
+
+    Ok(server_config)
+}
