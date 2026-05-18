@@ -290,6 +290,8 @@ impl ConnectionMigrator {
     /// - new_ipv6_addresses: Updated IPv6 addresses
     /// - new_ipv4_reflexive: Updated IPv4 reflexive addresses
     /// - new_prediction: New port prediction if NAT changed
+    ///
+    /// Wire format: 2-byte type ID (0x0001) + prost-encoded ConnectionMigration payload.
     async fn send_migration_notification(
         &self,
         connection: &Connection,
@@ -301,18 +303,18 @@ impl ConnectionMigrator {
             .await
             .map_err(|e| MigrationError::PathValidationFailed(e.to_string()))?;
 
-        // Build the ConnectionMigration message
-        // Wire format: 2-byte type ID (0x0001 for connection_migration) + prost payload
-        let _migration = build_migration_message(new_nat_info);
+        // Build the ConnectionMigration protobuf message
+        let migration = build_migration_message(new_nat_info);
 
         // Encode the message
+        // Wire format: 2-byte type ID (0x0001 for connection_migration) + prost payload
         let type_id: u16 = 0x0001;
-        let mut buf = Vec::with_capacity(256);
+        let payload = prost::Message::encode_to_vec(&migration);
+        let mut buf = Vec::with_capacity(2 + payload.len());
         buf.extend_from_slice(&type_id.to_be_bytes());
+        buf.extend_from_slice(&payload);
 
-        // Encode the prost message
-        // In a full implementation, this would use prost::Message::encode
-        // For now, we send the type ID as a minimal notification
+        // Write the full type ID + prost-encoded payload to the stream
         send.write_all(&buf)
             .await
             .map_err(|e| MigrationError::PathValidationFailed(e.to_string()))?;
@@ -320,7 +322,10 @@ impl ConnectionMigrator {
         send.finish()
             .map_err(|e| MigrationError::PathValidationFailed(e.to_string()))?;
 
-        debug!("Migration notification sent to peer");
+        debug!(
+            payload_len = payload.len(),
+            "Migration notification sent to peer (with serialized ConnectionMigration)"
+        );
         Ok(())
     }
 

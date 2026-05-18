@@ -562,10 +562,13 @@ impl MoqSession {
     ///
     /// 1. Open a bidirectional control stream
     /// 2. Send CLIENT_SETUP
-    /// 3. Receive SERVER_SETUP
+    /// 3. Receive and parse SERVER_SETUP from the control stream
     ///
     /// Per spec/05 §5.4: "QUIC handshake (1 RTT) → MoQ session setup
     /// on QUIC connection → client announces tracks"
+    ///
+    /// After a successful CLIENT_SETUP/SERVER_SETUP exchange, the session
+    /// transitions to the `Active` state and tracks can be announced/subscribed.
     #[instrument(skip(self))]
     pub async fn setup(&self) -> Result<(), MoqError> {
         let mut state = self.state.write().await;
@@ -600,10 +603,71 @@ impl MoqSession {
             }
         }
 
-        // Step 3: Receive SERVER_SETUP
-        // In a full implementation, we'd read from the control stream
-        // and parse the response. For now, we mark the session as active.
-        info!("MoQ session setup complete (CLIENT_SETUP sent)");
+        // Step 3: Receive SERVER_SETUP from the control stream
+        // Per ROADMAP 3.5: after sending CLIENT_SETUP, read the response
+        // from the control stream, parse the type byte to determine the
+        // message type, and for SERVER_SETUP (type 0x02), decode and
+        // validate the version.
+        {
+            let mut control_recv = self.control_recv.write().await;
+            let recv_stream = control_recv
+                .as_mut()
+                .ok_or_else(|| MoqError::TransportError("control receive stream missing".to_string()))?;
+
+            // Read the response — we need at least enough bytes for the message type varint
+            let mut buf = [0u8; 1024];
+            let n = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                recv_stream.read(&mut buf),
+            )
+            .await
+            .map_err(|_| MoqError::TransportError("SERVER_SETUP read timeout".to_string()))?
+            .map_err(|e| MoqError::TransportError(format!("read SERVER_SETUP: {}", e)))?
+            .unwrap_or(0);
+
+            if n == 0 {
+                return Err(MoqError::TransportError(
+                    "control stream closed before SERVER_SETUP received".to_string(),
+                ));
+            }
+
+            // Parse the message type varint from the start of the buffer
+            let (msg_type_val, _type_len) = decode_varint(&buf[..n]);
+
+            match msg_type_val {
+                0x02 => {
+                    // SERVER_SETUP — decode the version and role
+                    let server_setup = ServerSetup::decode(&buf[..n])?;
+                    debug!(
+                        version = server_setup.version,
+                        role = server_setup.role,
+                        "Received SERVER_SETUP"
+                    );
+
+                    // Validate that the server selected a compatible version
+                    if server_setup.version != ClientSetup::DRAFT_17 {
+                        warn!(
+                            server_version = server_setup.version,
+                            expected = ClientSetup::DRAFT_17,
+                            "Server selected unexpected MoQ version"
+                        );
+                        return Err(MoqError::VersionNegotiationFailed);
+                    }
+
+                    info!(
+                        version = server_setup.version,
+                        "MoQ session setup complete (SERVER_SETUP verified)"
+                    );
+                }
+                other => {
+                    // Unexpected message type during setup handshake
+                    return Err(MoqError::UnexpectedMessageType {
+                        expected: msg_type::SERVER_SETUP,
+                        got: other,
+                    });
+                }
+            }
+        }
 
         *self.state.write().await = SessionState::Active;
         Ok(())

@@ -453,7 +453,7 @@ impl ConnectionManager {
         let call_id = hex::encode(connection_id);
 
         for proxy in proxy_records.iter().take(self.config.masque_max_proxy_attempts as usize) {
-            match MasqueTunnel::connect_http3(&proxy.proxy_url, &call_id).await {
+            match MasqueTunnel::connect_http3(&proxy.proxy_url, &call_id, None).await {
                 Ok(tunnel) => {
                     info!(proxy_url = %proxy.proxy_url, "MASQUE HTTP/3 tunnel established");
                     return Ok(tunnel);
@@ -475,7 +475,7 @@ impl ConnectionManager {
         let call_id = hex::encode(connection_id);
 
         for proxy in proxy_records.iter().take(self.config.masque_max_proxy_attempts as usize) {
-            match MasqueTunnel::connect_http2(&proxy.proxy_url, &call_id).await {
+            match MasqueTunnel::connect_http2(&proxy.proxy_url, &call_id, None).await {
                 Ok(tunnel) => {
                     info!(proxy_url = %proxy.proxy_url, "MASQUE HTTP/2 tunnel established");
                     return Ok(tunnel);

@@ -27,3 +27,4 @@ rustls-acme = { workspace = true }
 hyper = { version = "1", features = ["client", "http2"] }
 tokio-rustls = "0.26"
 h2 = "0.4"
+reqwest = { version = "0.12", features = ["json"] }

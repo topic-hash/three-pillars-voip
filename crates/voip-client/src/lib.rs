@@ -29,10 +29,12 @@ pub mod masque;
 pub mod migration;
 pub mod moq;
 pub mod nat_probe;
+pub mod peer_cache;
 pub mod pipeline;
 pub mod probe;
 pub mod proxy;
 pub mod push_retry;
+pub mod signaling_client;
 pub mod tls;
 
 // Re-export key types from voip-core for convenience

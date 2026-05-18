@@ -76,12 +76,13 @@ impl MasqueTunnel {
     ///   `enable_extended_connect(true)` for CONNECT-UDP support
     /// - HTTP/3 datagram send/recv for carrying MoQ media
     /// - Stream-based request/response for the CONNECT-UDP handshake
-    #[instrument(skip(proxy_url, call_id))]
+    #[instrument(skip(proxy_url, call_id, proxy_token))]
     pub async fn connect_http3(
         proxy_url: &str,
         call_id: &str,
+        proxy_token: Option<&str>,
     ) -> Result<Self, MasqueError> {
-        info!(proxy_url = %proxy_url, call_id = %call_id, "Establishing MASQUE HTTP/3 tunnel");
+        info!(proxy_url = %proxy_url, call_id = %call_id, has_token = proxy_token.is_some(), "Establishing MASQUE HTTP/3 tunnel");
 
         // Step 1: Parse the proxy URL to get host and port
         let (host, port) = parse_proxy_url(proxy_url)?;
@@ -101,7 +102,7 @@ impl MasqueTunnel {
         let (h3_driver, mut send_req) = h3_conn;
 
         // Step 4: Build CONNECT-UDP request headers
-        let request = build_connect_udp_request(&host, port, call_id)?;
+        let request = build_connect_udp_request(&host, port, call_id, proxy_token)?;
 
         // Step 5: Send the CONNECT-UDP request
         let mut request_stream: h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes> = send_req
@@ -169,12 +170,13 @@ impl MasqueTunnel {
     ///   Quarter Stream ID: 0 (varint)
     ///   HTTP Datagram Payload: <QUIC packet — opaque to proxy>
     /// ```
-    #[instrument(skip(proxy_url, call_id))]
+    #[instrument(skip(proxy_url, call_id, proxy_token))]
     pub async fn connect_http2(
         proxy_url: &str,
         call_id: &str,
+        proxy_token: Option<&str>,
     ) -> Result<Self, MasqueError> {
-        info!(proxy_url = %proxy_url, call_id = %call_id, "Establishing MASQUE HTTP/2 tunnel");
+        info!(proxy_url = %proxy_url, call_id = %call_id, has_token = proxy_token.is_some(), "Establishing MASQUE HTTP/2 tunnel");
 
         // Step 1: Parse the proxy URL
         let (host, port) = parse_proxy_url(proxy_url)?;
@@ -189,7 +191,7 @@ impl MasqueTunnel {
 
         // Step 4: Perform HTTP/2 handshake with CONNECT-UDP
         // Build the CONNECT-UDP request
-        let request = build_connect_udp_request(&host, port, call_id)?;
+        let request = build_connect_udp_request(&host, port, call_id, proxy_token)?;
 
         // Send the request via HTTP/2 and wait for 200 OK
         // Using the hyper crate for HTTP/2 client support
@@ -326,7 +328,7 @@ impl MasqueTunnel {
             let proxy_url = &proxy.proxy_url;
             info!(proxy_url = %proxy_url, "Recovery: trying proxy");
 
-            match Self::connect_http3(proxy_url, &call_id).await {
+            match Self::connect_http3(proxy_url, &call_id, None).await {
                 Ok(new_tunnel) => {
                     info!(proxy_url = %proxy_url, "Recovery: MASQUE HTTP/3 tunnel re-established");
                     *self = new_tunnel;
@@ -334,7 +336,7 @@ impl MasqueTunnel {
                 }
                 Err(e) => {
                     warn!(proxy_url = %proxy_url, error = %e, "Recovery: HTTP/3 failed, trying HTTP/2");
-                    match Self::connect_http2(proxy_url, &call_id).await {
+                    match Self::connect_http2(proxy_url, &call_id, None).await {
                         Ok(new_tunnel) => {
                             info!(proxy_url = %proxy_url, "Recovery: MASQUE HTTP/2 tunnel re-established");
                             *self = new_tunnel;
@@ -388,15 +390,23 @@ impl MasqueTunnel {
 ///
 /// Uses Extended CONNECT (RFC 8441) with the `connect-udp` protocol.
 /// The `:protocol` pseudo-header is set via the h3 extended connect API.
-fn build_connect_udp_request(host: &str, port: u16, call_id: &str) -> Result<http::Request<()>, MasqueError> {
-    build_connect_udp_request_with_peer(host, port, call_id, "")
+///
+/// Per ROADMAP 3.22 and spec/12 §12.4: when a `proxy_token` is available,
+/// it is included as the `x-voip-proxy-token` header for anti-abuse
+/// verification by the proxy.
+fn build_connect_udp_request(host: &str, port: u16, call_id: &str, proxy_token: Option<&str>) -> Result<http::Request<()>, MasqueError> {
+    build_connect_udp_request_with_peer(host, port, call_id, "", proxy_token)
 }
 
 /// Build the CONNECT-UDP request headers per spec/12 §12.2.2 with optional peer ID.
 ///
 /// Uses Extended CONNECT (RFC 8441) with the `connect-udp` protocol.
 /// The `:protocol` pseudo-header is set via the h3 extended connect API.
-fn build_connect_udp_request_with_peer(host: &str, port: u16, call_id: &str, peer_id: &str) -> Result<http::Request<()>, MasqueError> {
+///
+/// Per ROADMAP 3.22: the `x-voip-proxy-token` header is included when
+/// a ProxyToken is available, allowing the proxy to verify the client's
+/// authorization with the signaling server.
+fn build_connect_udp_request_with_peer(host: &str, port: u16, call_id: &str, peer_id: &str, proxy_token: Option<&str>) -> Result<http::Request<()>, MasqueError> {
     let authority = format!("{}:{}", host, port);
 
     // Use the http::request::Builder API which properly handles pseudo-headers
@@ -414,6 +424,13 @@ fn build_connect_udp_request_with_peer(host: &str, port: u16, call_id: &str, pee
     // Per spec/12 §12.2.2: x-voip-peer-id header is required for proxy matching
     if !peer_id.is_empty() {
         builder = builder.header("x-voip-peer-id", peer_id);
+    }
+
+    // Per ROADMAP 3.22 / spec/12 §12.4: x-voip-proxy-token header is sent
+    // when a ProxyToken is available, allowing the proxy to verify
+    // the client's authorization with the signaling server.
+    if let Some(token) = proxy_token {
+        builder = builder.header("x-voip-proxy-token", token);
     }
 
     // For Extended CONNECT, the :protocol pseudo-header is set via
@@ -570,15 +587,29 @@ pub async fn establish_masque_tunnel(
     call_id: &str,
     udp_blocked: bool,
 ) -> Result<MasqueTunnel, MasqueError> {
+    establish_masque_tunnel_with_token(proxy_url, call_id, udp_blocked, None).await
+}
+
+/// Automatic MASQUE tunnel establishment with HTTP/3 → HTTP/2 fallback,
+/// with optional ProxyToken for anti-abuse verification.
+///
+/// Per spec/12 §12.6.4: try HTTP/3 first (UDP available, lower latency),
+/// then fall back to HTTP/2 (TCP, works when UDP is blocked).
+pub async fn establish_masque_tunnel_with_token(
+    proxy_url: &str,
+    call_id: &str,
+    udp_blocked: bool,
+    proxy_token: Option<&str>,
+) -> Result<MasqueTunnel, MasqueError> {
     // Try HTTP/3 first (QUIC/UDP — lower latency, no HOL blocking)
     if !udp_blocked {
-        if let Ok(tunnel) = MasqueTunnel::connect_http3(proxy_url, call_id).await {
+        if let Ok(tunnel) = MasqueTunnel::connect_http3(proxy_url, call_id, proxy_token).await {
             return Ok(tunnel);
         }
     }
 
     // Fall back to HTTP/2 (TCP — works when UDP is blocked)
-    if let Ok(tunnel) = MasqueTunnel::connect_http2(proxy_url, call_id).await {
+    if let Ok(tunnel) = MasqueTunnel::connect_http2(proxy_url, call_id, proxy_token).await {
         return Ok(tunnel);
     }
 
@@ -669,13 +700,33 @@ mod tests {
 
     #[test]
     fn test_build_connect_udp_request() {
-        let request = build_connect_udp_request("proxy.example.com", 443, "call-abc123").unwrap();
+        let request = build_connect_udp_request("proxy.example.com", 443, "call-abc123", None).unwrap();
         assert_eq!(request.method(), http::Method::CONNECT);
         assert_eq!(request.headers().get("connect-udp-target-host").unwrap(), "voip-relay");
         assert_eq!(request.headers().get("connect-udp-target-port").unwrap(), "0");
         assert_eq!(request.headers().get("x-voip-call-id").unwrap(), "call-abc123");
+        // No proxy token header when None
+        assert!(request.headers().get("x-voip-proxy-token").is_none());
         // Protocol is set via extensions, not headers
         assert!(request.extensions().get::<h3::ext::Protocol>().is_some());
+    }
+
+    #[test]
+    fn test_build_connect_udp_request_with_proxy_token() {
+        let request = build_connect_udp_request(
+            "proxy.example.com",
+            443,
+            "call-abc123",
+            Some("signed-token-base64"),
+        )
+        .unwrap();
+        assert_eq!(request.method(), http::Method::CONNECT);
+        assert_eq!(request.headers().get("x-voip-call-id").unwrap(), "call-abc123");
+        // ProxyToken header should be present
+        assert_eq!(
+            request.headers().get("x-voip-proxy-token").unwrap(),
+            "signed-token-base64"
+        );
     }
 
     #[test]
