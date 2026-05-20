@@ -1,2 +1,6 @@
 target/
 Cargo.lock
+
+# Secrets (never commit)
+.env
+.git-token
