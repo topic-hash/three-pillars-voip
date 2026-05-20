@@ -43,20 +43,17 @@ use crate::record::{PeerRecord, ProxyRecord, UsernameRecord};
 ///
 /// Configurable per-user via a single application setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum DiscoveryMode {
     /// DHT first (~80ms), fall back to signaling server if DHT fails.
     /// Default. Higher privacy — no single entity sees the social graph.
+    #[default]
     PrivacyFirst,
     /// Signaling server first (~5ms), fall back to DHT if server unreachable.
     /// Lower latency but the signaling server operator sees lookups.
     SpeedFirst,
 }
 
-impl Default for DiscoveryMode {
-    fn default() -> Self {
-        Self::PrivacyFirst
-    }
-}
 
 impl From<bool> for DiscoveryMode {
     fn from(privacy_first: bool) -> Self {

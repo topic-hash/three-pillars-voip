@@ -49,7 +49,7 @@ pub async fn handle_ws_connection(
         while let Some(msg) = rx.recv().await {
             let bytes = msg.to_bytes();
             if ws_sender
-                .send(axum::extract::ws::Message::Binary(bytes.into()))
+                .send(axum::extract::ws::Message::Binary(bytes))
                 .await
                 .is_err()
             {
@@ -83,8 +83,8 @@ pub async fn handle_ws_connection(
 
                 // Rate limit WS messages per peer
                 let pid = peer_id_recv.lock().await.clone();
-                if let Some(ref p_id) = pid {
-                    if !state_recv.inner.rate_limiter.check_ws_message(p_id).await {
+                if let Some(ref p_id) = pid
+                    && !state_recv.inner.rate_limiter.check_ws_message(p_id).await {
                         let err = FramedMessage::error(
                             codes::RATE_LIMITED,
                             "WebSocket message rate limit exceeded",
@@ -92,7 +92,6 @@ pub async fn handle_ws_connection(
                         let _ = tx_recv.send(err).await;
                         continue;
                     }
-                }
 
                 dispatch_ws_message(
                     framed,
@@ -274,8 +273,8 @@ async fn ws_handle_call_request(
     // Validate caller_id matches session
     {
         let pid = peer_id_holder.lock().await;
-        if let Some(ref session_peer) = *pid {
-            if *session_peer != caller_id {
+        if let Some(ref session_peer) = *pid
+            && *session_peer != caller_id {
                 let err = FramedMessage::error(
                     codes::NOT_CALL_PARTICIPANT,
                     "caller_id does not match session peer_id",
@@ -283,7 +282,6 @@ async fn ws_handle_call_request(
                 let _ = tx.send(err).await;
                 return;
             }
-        }
     }
 
     let call = crate::state::CallEntry {
@@ -353,8 +351,8 @@ async fn ws_handle_call_accept(
             }
         };
         let pid = peer_id_holder.lock().await;
-        if let Some(ref session_peer) = *pid {
-            if *session_peer != call_entry.callee_id {
+        if let Some(ref session_peer) = *pid
+            && *session_peer != call_entry.callee_id {
                 let err = FramedMessage::error(
                     codes::NOT_CALL_PARTICIPANT,
                     "only the callee can accept a call",
@@ -362,7 +360,6 @@ async fn ws_handle_call_accept(
                 let _ = tx.send(err).await;
                 return;
             }
-        }
     }
 
     // Update call state to ACCEPTED
@@ -425,8 +422,8 @@ async fn ws_handle_call_reject(
             }
         };
         let pid = peer_id_holder.lock().await;
-        if let Some(ref session_peer) = *pid {
-            if *session_peer != call_entry.callee_id {
+        if let Some(ref session_peer) = *pid
+            && *session_peer != call_entry.callee_id {
                 let err = FramedMessage::error(
                     codes::NOT_CALL_PARTICIPANT,
                     "only the callee can reject a call",
@@ -434,7 +431,6 @@ async fn ws_handle_call_reject(
                 let _ = tx.send(err).await;
                 return;
             }
-        }
         call_entry.caller_id
     };
 
@@ -473,8 +469,8 @@ async fn ws_handle_call_failed(
             let pid = peer_id_holder.lock().await;
             pid.clone()
         };
-        if let Some(ref sender) = sending_peer {
-            if sender != &call_entry.caller_id && sender != &call_entry.callee_id {
+        if let Some(ref sender) = sending_peer
+            && sender != &call_entry.caller_id && sender != &call_entry.callee_id {
                 let err = FramedMessage::error(
                     codes::NOT_CALL_PARTICIPANT,
                     "not a participant in this call",
@@ -482,7 +478,6 @@ async fn ws_handle_call_failed(
                 let _ = tx.send(err).await;
                 return;
             }
-        }
 
         let other_peer = {
             if Some(&call_entry.caller_id) == sending_peer.as_ref() {
@@ -574,8 +569,8 @@ async fn ws_handle_call_ended(
             let pid = peer_id_holder.lock().await;
             pid.clone()
         };
-        if let Some(ref sender) = sending_peer {
-            if sender != &call_entry.caller_id && sender != &call_entry.callee_id {
+        if let Some(ref sender) = sending_peer
+            && sender != &call_entry.caller_id && sender != &call_entry.callee_id {
                 let err = FramedMessage::error(
                     codes::NOT_CALL_PARTICIPANT,
                     "not a participant in this call",
@@ -583,7 +578,6 @@ async fn ws_handle_call_ended(
                 let _ = tx.send(err).await;
                 return;
             }
-        }
 
         let other_peer = {
             if Some(&call_entry.caller_id) == sending_peer.as_ref() {

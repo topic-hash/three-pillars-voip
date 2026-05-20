@@ -175,8 +175,8 @@ impl ConnectionMigrator {
                 let mut new_nat_info: Option<NATInfo> = None;
                 let mut nat_reprobed = false;
 
-                if event.requires_nat_reprobe() {
-                    if let Some(prober) = nat_prober {
+                if event.requires_nat_reprobe()
+                    && let Some(prober) = nat_prober {
                         info!("Re-probing NAT after network change");
                         prober.invalidate_cache().await;
 
@@ -195,7 +195,6 @@ impl ConnectionMigrator {
                             }
                         }
                     }
-                }
 
                 // Step 3: Signal new address to peer
                 // Send a ConnectionMigration message on the QUIC stream

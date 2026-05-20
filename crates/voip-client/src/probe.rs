@@ -81,7 +81,7 @@ impl PortPredictionProber {
         let range_size = (port_end as u32) - (port_start as u32) + 1;
         let max_probes = self.config.prediction_max_probes;
 
-        if range_size > max_probes as u32 {
+        if range_size > max_probes {
             warn!(
                 range_size,
                 max_probes,

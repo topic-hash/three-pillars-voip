@@ -97,7 +97,7 @@ impl PushRetryHandler {
             call_id: call_id.to_string(),
             caller_id: String::new(), // Set by signaling server
             callee_id: peer_id.to_string(),
-            reason: voip_core::types::CallEndReason::from(reason) as i32,
+            reason: reason as i32,
             retry_attempt: self.retry_count + 1,
             retry_after_ms: delay_ms,
         }

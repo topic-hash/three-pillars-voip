@@ -75,7 +75,7 @@ MASQUE CONNECT-UDP runs over HTTP/3 (QUIC) when UDP is available, or over HTTP/2
 
 | Component | Technology |
 |-----------|-----------|
-| Language | Rust (2024 edition, MSRV 1.85) |
+| Language | Rust (2024 edition, MSRV 1.95) |
 | Async runtime | tokio |
 | QUIC | quinn 0.11 |
 | DHT | libp2p KadDHT |
@@ -132,7 +132,7 @@ voip-signaling → voip-core
 
 ### Prerequisites
 
-- Rust 1.85+ (2024 edition)
+- Rust 1.95+ (2024 edition)
 - Protobuf compiler (`protoc`) — for prost-build
 - Opus development headers — for the `opus` crate
 

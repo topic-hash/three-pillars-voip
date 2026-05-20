@@ -576,7 +576,7 @@ impl ProxyToken {
     ///
     /// Inverse of `encode()`.
     pub fn decode(encoded: &str) -> Result<Self, ProxyTokenError> {
-        let buf = base64_decode(encoded).map_err(|e| ProxyTokenError::Base64DecodeError(e))?;
+        let buf = base64_decode(encoded).map_err(ProxyTokenError::Base64DecodeError)?;
 
         let mut pos = 0;
 
@@ -918,15 +918,14 @@ impl TunnelRecoveryHandler {
         let mut proxies: Vec<&voip_core::proto::signaling::ProxyRecord> = Vec::new();
 
         // Prefer the last successful proxy first
-        if let Some(ref last_url) = self.last_proxy_url {
-            if let Some(last_proxy) = self
+        if let Some(ref last_url) = self.last_proxy_url
+            && let Some(last_proxy) = self
                 .cached_proxies
                 .iter()
                 .find(|p| &p.proxy_url == last_url)
             {
                 proxies.push(last_proxy);
             }
-        }
 
         // Add remaining proxies sorted by latency hint
         let mut others: Vec<&voip_core::proto::signaling::ProxyRecord> = self
@@ -935,7 +934,7 @@ impl TunnelRecoveryHandler {
             .filter(|p| {
                 self.last_proxy_url
                     .as_ref()
-                    .map_or(true, |url| p.proxy_url != *url)
+                    .is_none_or(|url| p.proxy_url != *url)
             })
             .collect();
         others.sort_by_key(|p| p.latency_hint_ms);
@@ -1045,15 +1044,14 @@ impl ProxyCache {
         }
 
         // Prefer last-used proxy
-        if let Some(ref last_url) = self.last_used {
-            if let Some(cached) = self
+        if let Some(ref last_url) = self.last_used
+            && let Some(cached) = self
                 .proxies
                 .iter()
                 .find(|p| p.record.proxy_url == *last_url)
             {
                 return Some(&cached.record);
             }
-        }
 
         // Fall back to lowest latency
         self.proxies
@@ -1129,7 +1127,7 @@ fn base64_encode(data: &[u8]) -> String {
     const CHARSET: &[u8; 64] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-    let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
     let chunks = data.chunks(3);
 
     for chunk in chunks {

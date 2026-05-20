@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "crates/voip-core",
     "crates/voip-signaling",
@@ -11,7 +11,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 license = "MIT"
 repository = "https://github.com/topic-hash/three-pillars-voip"
 

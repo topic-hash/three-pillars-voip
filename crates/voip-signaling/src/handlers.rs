@@ -379,7 +379,7 @@ pub async fn get_peer(
     let info = state
         .get_peer(&peer_id)
         .await
-        .ok_or_else(|| SignalingError::UnknownPeer(peer_id))?;
+        .ok_or(SignalingError::UnknownPeer(peer_id))?;
 
     Ok(Json(PeerResponse {
         peer_id: info.peer_id,
@@ -412,7 +412,7 @@ pub async fn get_peer_status(
     let info = state
         .get_peer(&peer_id)
         .await
-        .ok_or_else(|| SignalingError::UnknownPeer(peer_id))?;
+        .ok_or(SignalingError::UnknownPeer(peer_id))?;
 
     Ok(Json(PeerStatusResponse {
         peer_id: info.peer_id,

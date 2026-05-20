@@ -485,12 +485,11 @@ impl ConnectionManager {
             .unwrap_or(false);
         let peer_has_cone = peer_nat.nat_type == NATType::Cone;
 
-        if (local_has_cone || peer_has_cone) && !udp_blocked {
-            if let Some(conn) = self.try_simultaneous_open(peer, connection_id).await {
+        if (local_has_cone || peer_has_cone) && !udp_blocked
+            && let Some(conn) = self.try_simultaneous_open(peer, connection_id).await {
                 info!(method = ?ConnectionMethod::Ipv4Cone, "Connected via QUIC Simultaneous Open");
                 return Ok(conn);
             }
-        }
 
         // Step 3: QUIC Port Prediction (Symmetric NAT)
         // If both have predictable (sequential/pseudo) NAT, try port prediction.
@@ -500,20 +499,19 @@ impl ConnectionManager {
             .unwrap_or(false);
         let peer_predictable = peer_nat.nat_type.is_predictable();
 
-        if (local_predictable || peer_predictable) && !udp_blocked {
-            if let Some(conn) = self
+        if (local_predictable || peer_predictable) && !udp_blocked
+            && let Some(conn) = self
                 .try_port_prediction(peer, &local_nat, connection_id)
                 .await
             {
                 info!(method = ?ConnectionMethod::Ipv4Prediction, "Connected via QUIC Port Prediction");
                 return Ok(conn);
             }
-        }
 
         // Step 4: MASQUE over HTTP/3 (UDP available)
         if self.config.masque_fallback_enabled && !proxy_records.is_empty() {
-            if !udp_blocked {
-                if let Ok(tunnel) = self
+            if !udp_blocked
+                && let Ok(tunnel) = self
                     .try_masque_http3(proxy_records, connection_id)
                     .await
                 {
@@ -526,7 +524,6 @@ impl ConnectionManager {
                         tunnel,
                     ));
                 }
-            }
 
             // Step 5: MASQUE over HTTP/2 (UDP blocked)
             if let Ok(tunnel) = self.try_masque_http2(proxy_records, connection_id).await {

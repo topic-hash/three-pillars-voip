@@ -138,7 +138,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// Returns `VoipError::InvalidKeyMaterial` if the string contains
 /// invalid hex characters or has an odd length.
 fn hex_decode(s: &str) -> Result<Vec<u8>, VoipError> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(VoipError::InvalidKeyMaterial(
             "hex string has odd length".to_string(),
         ));

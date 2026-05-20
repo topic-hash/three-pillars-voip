@@ -32,7 +32,6 @@ pub struct JwtClaims {
 ///
 /// We implement this manually instead of using a JWT crate because
 /// most JWT crates only support HMAC/ECDSA/RSA, not Ed25519 directly.
-
 const JWT_HEADER: &str = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9";
 
 /// Create a JWT token signed with the server's Ed25519 signing key.
@@ -141,7 +140,7 @@ fn base64url_encode(data: &[u8]) -> String {
         if i + 1 < data.len() {
             result.push(CHARSET[(((b0 & 0x03) << 4) | ((b1 >> 4) & 0x0F)) as usize] as char);
         } else {
-            result.push(CHARSET[(((b0 & 0x03) << 4)) as usize] as char);
+            result.push(CHARSET[((b0 & 0x03) << 4) as usize] as char);
             break;
         }
 
@@ -149,7 +148,7 @@ fn base64url_encode(data: &[u8]) -> String {
             result.push(CHARSET[(((b1 & 0x0F) << 2) | ((b2 >> 6) & 0x03)) as usize] as char);
             result.push(CHARSET[(b2 & 0x3F) as usize] as char);
         } else {
-            result.push(CHARSET[(((b1 & 0x0F) << 2)) as usize] as char);
+            result.push(CHARSET[((b1 & 0x0F) << 2) as usize] as char);
             break;
         }
 

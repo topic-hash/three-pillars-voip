@@ -702,7 +702,7 @@ async fn create_loopback_quic_pair(
     );
 
     // Keep the server task alive
-    let _ = server_task;
+    drop(server_task);
 
     Ok(client_conn)
 }
@@ -825,11 +825,10 @@ pub async fn establish_masque_tunnel_with_token(
     proxy_token: Option<&str>,
 ) -> Result<MasqueTunnel, MasqueError> {
     // Try HTTP/3 first (QUIC/UDP — lower latency, no HOL blocking)
-    if !udp_blocked {
-        if let Ok(tunnel) = MasqueTunnel::connect_http3(proxy_url, call_id, proxy_token).await {
+    if !udp_blocked
+        && let Ok(tunnel) = MasqueTunnel::connect_http3(proxy_url, call_id, proxy_token).await {
             return Ok(tunnel);
         }
-    }
 
     // Fall back to HTTP/2 (TCP — works when UDP is blocked)
     if let Ok(tunnel) = MasqueTunnel::connect_http2(proxy_url, call_id, proxy_token).await {
