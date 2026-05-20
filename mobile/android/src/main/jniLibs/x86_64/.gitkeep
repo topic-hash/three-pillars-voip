@@ -1,0 +1,6 @@
+# x86_64 native library (emulator)
+#
+# This directory is populated by `cargo ndk`:
+#   cargo ndk -t x86_64 -o mobile/android/src/main/jniLibs build --release -p voip-ffi
+#
+# The compiled libvoip_ffi.so goes here.

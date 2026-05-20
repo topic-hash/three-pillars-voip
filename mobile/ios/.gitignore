@@ -1,0 +1,7 @@
+.DS_Store
+.build/
+.swiftpm/
+ThreePillarsVoIP.xcframework/
+Sources/ThreePillarsVoIP*
+Sources/voip_ffi*
+*.a
