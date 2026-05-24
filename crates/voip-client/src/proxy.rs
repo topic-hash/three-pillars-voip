@@ -473,8 +473,9 @@ impl ProxyToken {
     ///
     /// # Signing Format
     ///
-    /// The signature covers: `peer_id || proxy_url || expires_at_be || issued_at_be`
-    /// where `_be` denotes big-endian 8-byte encoding.
+    /// The signature covers: `peer_id_len:u32_be || peer_id || proxy_url_len:u32_be || proxy_url ||
+    /// expires_at_be || issued_at_be` where `_be` denotes big-endian encoding.
+    /// Length prefixes prevent ambiguity between different `(peer_id, proxy_url)` pairs.
     #[instrument(skip(signing_key))]
     pub fn sign(
         peer_id: &str,
@@ -615,7 +616,12 @@ impl ProxyToken {
 
     /// Build the message that is signed.
     ///
-    /// Format: `peer_id || proxy_url || expires_at_be || issued_at_be`
+    /// Format: `peer_id_len:u32_be || peer_id || proxy_url_len:u32_be || proxy_url ||
+    ///          expires_at:u64_be || issued_at:u64_be`
+    ///
+    /// Length prefixes eliminate signing ambiguity: without them, different
+    /// `(peer_id, proxy_url)` pairs could produce the same byte sequence
+    /// (e.g., `("ab", "cd")` vs `("abc", "d")` both yield `"abcd"`).
     fn signing_message(peer_id: &str, proxy_url: &str, expires_at: u64, issued_at: u64) -> Vec<u8> {
         let peer_id_bytes = peer_id.as_bytes();
         let proxy_url_bytes = proxy_url.as_bytes();

@@ -143,11 +143,10 @@ impl MasqueTunnel {
             "MASQUE HTTP/3 tunnel established (CONNECT-UDP 200 OK)"
         );
 
-        // The h3_driver and request_stream are kept alive for datagram send/recv.
-        // In a full implementation, these would be stored in the MasqueTunnel
-        // struct and used for datagram exchange via h3's datagram API.
-        // For now, we keep the QUIC connection and use its datagram API directly.
-        // h3_driver stored in tunnel to keep h3 connection alive
+        // The request_stream is no longer needed after the handshake,
+        // but the h3_driver must be kept alive for the h3 connection to
+        // continue making progress (e.g., processing server-initiated
+        // streams, handling flow control). We store it in the tunnel.
         drop(request_stream);
 
         Ok(Self {
@@ -650,12 +649,8 @@ async fn perform_h2_handshake(
 /// 3. The returned client-side connection is used by MoQ
 ///
 /// A background task bridges the server-side connection to the h2 stream:
-/// - Data received from h2 (RFC 9297 capsules) → forwarded as QUIC datagrams
+/// - Data received from h2 (RFC 9297 capsules) → decoded → forwarded as QUIC datagrams
 /// - QUIC datagrams from the server connection → encoded as RFC 9297 capsules → sent via h2
-///
-/// **Note**: This is a placeholder implementation. A full implementation
-/// would spawn background tasks to bridge the h2 send/recv streams with
-/// the server-side QUIC connection's datagram API.
 async fn create_loopback_quic_pair(
     h2_result: H2Tunnel,
 ) -> Result<(Connection, tokio::task::JoinHandle<()>), MasqueError> {
@@ -681,25 +676,86 @@ async fn create_loopback_quic_pair(
         .map_err(|e| MasqueError::Http2Error(format!("create client endpoint: {}", e)))?;
     client_endpoint.set_default_client_config(client_config);
 
-    // Spawn server accept task
+    // Extract h2 tunnel components
+    let H2Tunnel { conn_task, mut send_stream, mut recv_stream } = h2_result;
+
+    // Spawn server accept task with h2 bridge
     let server_task = tokio::spawn(async move {
-        if let Some(incoming) = server_endpoint.accept().await {
-            let conn = incoming.await;
-            if let Ok(server_conn) = conn {
-                // TODO: Bridge the server_conn to the h2 send/recv streams.
-                // This would involve:
-                // 1. Reading QUIC datagrams from server_conn and forwarding
-                //    them as RFC 9297 capsules via h2 send_stream
-                // 2. Reading RFC 9297 capsules from h2 recv_stream and
-                //    forwarding them as QUIC datagrams via server_conn
-                //
-                // For now, just keep the server connection alive.
-                // The actual bridging will be implemented when integrating
-                // with the full MoQ pipeline.
-                let _ = server_conn;
-                // Wait indefinitely (or until connection closes)
-                std::future::pending::<()>().await;
+        // Accept the incoming connection from the client side
+        let server_conn = match server_endpoint.accept().await {
+            Some(incoming) => match incoming.await {
+                Ok(conn) => conn,
+                Err(e) => {
+                    debug!(error = %e, "Loopback QUIC server accept failed");
+                    return;
+                }
+            },
+            None => {
+                debug!("Loopback QUIC server endpoint closed");
+                return;
             }
+        };
+
+        // Bridge task: h2 recv_stream → server_conn (QUIC datagrams)
+        let conn_for_recv = server_conn.clone();
+        let h2_to_quic = tokio::spawn(async move {
+            loop {
+                // Read DATA frame from h2 recv_stream
+                let data = match recv_stream.data().await {
+                    Ok(Some(data)) => data,
+                    Ok(None) => break, // stream ended
+                    Err(e) => {
+                        debug!(error = %e, "h2 recv_stream data read error");
+                        break;
+                    }
+                };
+
+                // Decode the RFC 9297 capsule
+                let quic_packet = match decode_datagram_capsule(&data) {
+                    Ok(pkt) => pkt,
+                    Err(e) => {
+                        debug!(error = %e, "Failed to decode DATAGRAM capsule");
+                        continue;
+                    }
+                };
+
+                // Send as QUIC datagram via the server connection
+                if let Err(e) = conn_for_recv.send_datagram(Bytes::from(quic_packet)) {
+                    debug!(error = %e, "Failed to send QUIC datagram to loopback server");
+                    break;
+                }
+            }
+        });
+
+        // Bridge task: server_conn (QUIC datagrams) → h2 send_stream
+        let quic_to_h2 = tokio::spawn(async move {
+            loop {
+                // Read QUIC datagram from the server connection
+                match server_conn.read_datagram().await {
+                    Ok(data) => {
+                        // Encode as RFC 9297 capsule
+                        let capsule = encode_datagram_capsule(&data);
+                        // Send as h2 DATA frame
+                        send_stream.send_data(capsule).unwrap_or_else(|e| {
+                            debug!(error = %e, "Failed to send h2 DATA frame");
+                        });
+                        send_stream.reserve_capacity(data.len());
+                    }
+                    Err(e) => {
+                        debug!(error = %e, "QUIC datagram read error on loopback server");
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Keep conn_task alive
+        let _ = conn_task;
+
+        // Wait for either bridge to complete
+        tokio::select! {
+            _ = h2_to_quic => {},
+            _ = quic_to_h2 => {},
         }
     });
 
@@ -712,11 +768,8 @@ async fn create_loopback_quic_pair(
 
     info!(
         addr = %server_addr,
-        "HTTP/2 MASQUE loopback QUIC pair created"
+        "HTTP/2 MASQUE loopback QUIC pair created with h2 bridge"
     );
-
-    // Keep the server task alive
-    let _ = h2_result; // keep H2Tunnel alive for bridge
 
     Ok((client_conn, server_task))
 }
@@ -785,8 +838,7 @@ fn encode_h2_datagram_capsule(data: &[u8]) -> Vec<u8> {
 
 /// Encode a varint into a byte buffer.
 ///
-/// Used by [`encode_h2_datagram_capsule`] for RFC 9297 framing.
-#[allow(dead_code)]
+/// Used by [`encode_datagram_capsule`] and [`encode_h2_datagram_capsule`] for RFC 9297 framing.
 fn encode_varint(buf: &mut Vec<u8>, mut value: u64) {
     loop {
         let mut byte = (value & 0x7F) as u8;
@@ -803,8 +855,7 @@ fn encode_varint(buf: &mut Vec<u8>, mut value: u64) {
 
 /// Calculate the encoded length of a varint.
 ///
-/// Used by [`encode_h2_datagram_capsule`] for length calculation.
-#[allow(dead_code)]
+/// Used by [`encode_datagram_capsule`] and [`encode_h2_datagram_capsule`] for length calculation.
 fn varint_len(value: u64) -> u64 {
     let mut len = 1;
     let mut v = value;
@@ -813,6 +864,92 @@ fn varint_len(value: u64) -> u64 {
         len += 1;
     }
     len
+}
+
+/// Encode a QUIC packet as an RFC 9297 §5 DATAGRAM capsule for HTTP/2.
+///
+/// Capsule format:
+///   Capsule Type (varint): 0x00 (DATAGRAM)
+///   Length (varint): length of remaining data
+///   Quarter Stream ID (varint): 0 (we use stream 0)
+///   HTTP Datagram Payload: the QUIC packet bytes
+fn encode_datagram_capsule(quic_packet: &[u8]) -> Bytes {
+    let quarter_stream_id: u64 = 0;
+    let payload_len = varint_len(quarter_stream_id) + quic_packet.len() as u64;
+
+    let mut capsule = Vec::with_capacity(quic_packet.len() + 16);
+    encode_varint(&mut capsule, 0); // Capsule type: DATAGRAM
+    encode_varint(&mut capsule, payload_len);
+    encode_varint(&mut capsule, quarter_stream_id);
+    capsule.extend_from_slice(quic_packet);
+    Bytes::from(capsule)
+}
+
+/// Decode an RFC 9297 §5 DATAGRAM capsule from h2 DATA frame bytes.
+///
+/// Returns the QUIC packet payload extracted from the capsule.
+fn decode_datagram_capsule(data: &[u8]) -> Result<Vec<u8>, MasqueError> {
+    let mut pos = 0;
+
+    // Read capsule type (varint) — must be 0 (DATAGRAM)
+    let (capsule_type, ct_len) = decode_h2_varint(&data[pos..]);
+    pos += ct_len;
+    if capsule_type != 0 {
+        return Err(MasqueError::Http2Error(format!(
+            "expected DATAGRAM capsule type 0, got {}", capsule_type
+        )));
+    }
+
+    // Read capsule length (varint)
+    let (capsule_len, cl_len) = decode_h2_varint(&data[pos..]);
+    pos += cl_len;
+
+    // Read quarter stream ID (varint)
+    let (_quarter_stream_id, qs_len) = decode_h2_varint(&data[pos..]);
+    pos += qs_len;
+
+    // Remaining bytes are the QUIC packet
+    let end = pos + capsule_len as usize - qs_len;
+    if end > data.len() {
+        return Err(MasqueError::Http2Error(format!(
+            "capsule payload truncated: expected {} bytes, have {}",
+            end - pos,
+            data.len() - pos
+        )));
+    }
+
+    Ok(data[pos..end].to_vec())
+}
+
+/// Decode a varint from h2 capsule data (same encoding as QUIC varints).
+fn decode_h2_varint(data: &[u8]) -> (u64, usize) {
+    if data.is_empty() {
+        return (0, 0);
+    }
+    let first = data[0];
+    let prefix = first >> 6;
+    match prefix {
+        0 => (first as u64 & 0x3F, 1),
+        1 => {
+            if data.len() < 2 { return (0, 0); }
+            let val = u16::from_be_bytes([data[0], data[1]]) as u64 & 0x3FFF;
+            (val, 2)
+        }
+        2 => {
+            if data.len() < 4 { return (0, 0); }
+            let val = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as u64 & 0x3FFFFFFF;
+            (val, 4)
+        }
+        3 => {
+            if data.len() < 8 { return (0, 0); }
+            let val = u64::from_be_bytes([
+                data[0], data[1], data[2], data[3],
+                data[4], data[5], data[6], data[7],
+            ]) & 0x3FFFFFFFFFFFFFFF;
+            (val, 8)
+        }
+        _ => unreachable!(),
+    }
 }
 
 /// Automatic MASQUE tunnel establishment with HTTP/3 → HTTP/2 fallback.

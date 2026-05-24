@@ -301,10 +301,17 @@ pub async fn try_simultaneous_open_full(
                     Ok(Err(e)) => {
                         debug!(error = %e, "Simultaneous open: accept side failed");
                         last_error = e;
+                        // Accept failed, wait for connect
+                        if connect_handle.is_finished() {
+                            break;
+                        }
                     }
                     Err(e) => {
                         debug!(error = %e, "Simultaneous open: accept task join error");
                         last_error = ConnectError::NetworkError(format!("task error: {}", e));
+                        if connect_handle.is_finished() {
+                            break;
+                        }
                     }
                 }
             }
@@ -318,10 +325,16 @@ pub async fn try_simultaneous_open_full(
                     Ok(Err(e)) => {
                         debug!(error = %e, "Simultaneous open: connect side failed");
                         last_error = e;
+                        if accept_handle.is_finished() {
+                            break;
+                        }
                     }
                     Err(e) => {
                         debug!(error = %e, "Simultaneous open: connect task join error");
                         last_error = ConnectError::NetworkError(format!("task error: {}", e));
+                        if accept_handle.is_finished() {
+                            break;
+                        }
                     }
                 }
             }

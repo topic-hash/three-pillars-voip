@@ -93,6 +93,18 @@ async fn main() {
         }
     });
 
+    // ── Periodic rate limiter cleanup ────────────────────────────────
+    {
+        let rate_limiter = server.state().inner.rate_limiter.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                rate_limiter.cleanup().await;
+            }
+        });
+    }
+
     // ── Start the axum HTTP server with graceful shutdown ──────────
     let listener = tokio::net::TcpListener::bind(addr)
         .await

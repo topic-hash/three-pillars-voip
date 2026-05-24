@@ -108,7 +108,10 @@ pub struct VoIPConfig {
     /// Interval between MoQ quality feedback reports (milliseconds)
     pub moq_feedback_interval_ms: u64,
 
-    /// WebSocket idle timeout in seconds (default: 300 = 5 minutes)
+    // === WebSocket ===
+    /// Idle timeout for WebSocket connections (seconds). Connections with
+    /// no activity for this duration are disconnected.
+
     pub ws_idle_timeout_secs: u64,
 }
 
@@ -312,6 +315,7 @@ mod tests {
         assert!(config.signaling_server_ips.is_empty());
         assert_eq!(config.session_ticket_ttl_secs, 86400);
         assert_eq!(config.moq_feedback_interval_ms, 1000);
+        assert_eq!(config.ws_idle_timeout_secs, 300);
     }
 
     #[test]

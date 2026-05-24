@@ -58,6 +58,9 @@ pub mod msg_type {
     pub const SUBSCRIBE: u64 = 0x06;
     pub const SUBSCRIBE_OK: u64 = 0x07;
     pub const SUBSCRIBE_ERROR: u64 = 0x08;
+    pub const ANNOUNCE_CANCEL: u64 = 0x0D;
+    pub const GOAWAY: u64 = 0x1A;
+    pub const MAX_SUBSCRIBE_ID: u64 = 0x1B;
     pub const TRACK_UPDATE: u64 = 0x10;
     pub const CONNECTION_MIGRATION: u64 = 0x20;
 }
@@ -542,6 +545,59 @@ struct TrackSubscription {
     start: StartPoint,
 }
 
+/// Parsed CLIENT_SETUP parameters extracted from the control stream.
+struct ClientSetupParams {
+    versions: Vec<u64>,
+    role: u8,
+    path: Option<String>,
+}
+
+/// Parse a CLIENT_SETUP message from bytes on the control stream.
+fn parse_client_setup(data: &[u8]) -> Result<ClientSetupParams, MoqError> {
+    let mut cursor = data;
+    let (msg_type_val, mt_len) = decode_varint(cursor);
+    cursor.advance(mt_len);
+
+    if msg_type_val != msg_type::CLIENT_SETUP {
+        return Err(MoqError::UnexpectedMessageType {
+            expected: msg_type::CLIENT_SETUP,
+            got: msg_type_val,
+        });
+    }
+
+    // Read number of versions
+    let (num_versions, nv_len) = decode_varint(cursor);
+    cursor.advance(nv_len);
+
+    let mut versions = Vec::with_capacity(num_versions as usize);
+    for _ in 0..num_versions {
+        let (v, v_len) = decode_varint(cursor);
+        cursor.advance(v_len);
+        versions.push(v);
+    }
+
+    let (role, r_len) = decode_varint(cursor);
+    cursor.advance(r_len);
+
+    let path = if cursor.has_remaining() {
+        let (path_len, pl_len) = decode_varint(cursor);
+        cursor.advance(pl_len);
+        if cursor.len() >= path_len as usize {
+            Some(String::from_utf8_lossy(&cursor[..path_len as usize]).to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(ClientSetupParams {
+        versions,
+        role: role as u8,
+        path,
+    })
+}
+
 impl MoqSession {
     /// Create a new MoQ session on an existing QUIC connection.
     ///
@@ -705,7 +761,7 @@ impl MoqSession {
         *self.control_send.write().await = Some(send);
         *self.control_recv.write().await = Some(recv);
 
-        // Step 1: Read CLIENT_SETUP from the client (required per MoQ draft-17)
+        // Step 1: READ CLIENT_SETUP from the client (per MoQ draft-17 §7.1)
         {
             let mut control_recv = self.control_recv.write().await;
             let recv_stream = control_recv
@@ -728,16 +784,24 @@ impl MoqSession {
                 ));
             }
 
-            // Parse and validate CLIENT_SETUP
-            let (msg_type_val, _) = decode_varint(&buf[..n]);
-            if msg_type_val != msg_type::CLIENT_SETUP {
-                return Err(MoqError::UnexpectedMessageType {
-                    expected: msg_type::CLIENT_SETUP,
-                    got: msg_type_val,
-                });
+            // Parse CLIENT_SETUP
+            let client_setup = parse_client_setup(&buf[..n])?;
+
+            // Validate that the client supports draft-17
+            if !client_setup.versions.contains(&ClientSetup::DRAFT_17) {
+                warn!(
+                    client_versions = ?client_setup.versions,
+                    expected = ClientSetup::DRAFT_17,
+                    "Client does not support MoQ draft-17"
+                );
+                return Err(MoqError::VersionNegotiationFailed);
             }
 
-            debug!("Received CLIENT_SETUP, validating version and role");
+            debug!(
+                versions = ?client_setup.versions,
+                role = client_setup.role,
+                "Received CLIENT_SETUP"
+            );
         }
 
         // Step 2: Send SERVER_SETUP in response

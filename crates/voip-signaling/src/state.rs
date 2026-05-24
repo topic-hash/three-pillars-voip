@@ -153,9 +153,9 @@ pub struct AppState {
 
 #[derive(Debug)]
 pub struct InnerState {
-    /// Connected / registered peers.
+    /// Connected / registered peers (bounded LRU cache, evicts least-recently-used when full).
     pub peers: RwLock<LruCache<String, PeerEntry>>,
-    /// Active calls.
+    /// Active calls (bounded LRU cache, evicts least-recently-used when full).
     pub calls: RwLock<LruCache<String, CallEntry>>,
     /// Rate limiter.
     pub rate_limiter: RateLimiter,
@@ -298,15 +298,15 @@ impl AppState {
     /// either peer is unknown.
     pub async fn create_call(&self, call: CallEntry) -> crate::error::Result<()> {
         let mut peers = self.inner.peers.write().await;
-        if peers.get(&call.caller_id).is_none() {
+        if !peers.contains(&call.caller_id) {
             return Err(SignalingError::UnknownPeer(call.caller_id.clone()));
         }
-        if peers.get(&call.callee_id).is_none() {
+        if !peers.contains(&call.callee_id) {
             return Err(SignalingError::UnknownPeer(call.callee_id.clone()));
         }
-        // peers lock still held — no gap for TOCTOU
+        // peers write lock still held — no gap for TOCTOU
         let mut calls = self.inner.calls.write().await;
-        if calls.get(&call.call_id).is_some() {
+        if calls.contains(&call.call_id) {
             return Err(SignalingError::CallAlreadyExists(call.call_id.clone()));
         }
         info!(call_id = %call.call_id, caller = %call.caller_id, callee = %call.callee_id, "call created");

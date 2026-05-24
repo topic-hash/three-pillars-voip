@@ -243,7 +243,7 @@ message MasqueRelayNeeded {
   string call_id       = 1; // The call that needs relay
   string proxy_url     = 2; // MASQUE proxy endpoint to connect to
   uint32 wait_timeout_ms = 3; // Max time to wait for peer to also connect to proxy (default: 10000)
-  ProxyToken proxy_token = 4;
+  ProxyToken proxy_token = 4; // Anti-abuse token signed by the signaling server
 }
 
 // ==================== PROXY TOKEN (Anti-Abuse) ====================

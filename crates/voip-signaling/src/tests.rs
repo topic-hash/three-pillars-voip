@@ -533,8 +533,8 @@ async fn test_lookup_peer() {
     state.register_peer(info, None).await.unwrap();
 
     // Lookup by scanning peers (same logic as handlers::lookup_peer)
-    let peers = state.inner.peers.read().await;
-    let found = peers.values().find(|e| e.info.display_name == "LookupUser");
+    let mut peers = state.inner.peers.write().await;
+    let found = peers.iter().find(|(_, e)| e.info.display_name == "LookupUser").map(|(_, e)| e);
     assert!(found.is_some());
     let entry = found.unwrap();
     assert_eq!(entry.info.peer_id, peer_id);
@@ -563,9 +563,9 @@ async fn test_lookup_peer_case_insensitive() {
     state.register_peer(info, None).await.unwrap();
 
     // Case-insensitive lookup (same logic as handlers::lookup_peer)
-    let peers = state.inner.peers.read().await;
+    let mut peers = state.inner.peers.write().await;
     let query_lower = "caseuser".to_lowercase();
-    let found = peers.values().find(|e| e.info.display_name.to_lowercase() == query_lower);
+    let found = peers.iter().find(|(_, e)| e.info.display_name.to_lowercase() == query_lower).map(|(_, e)| e);
     assert!(found.is_some());
     assert_eq!(found.unwrap().info.peer_id, peer_id);
 }

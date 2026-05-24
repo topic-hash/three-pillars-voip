@@ -114,6 +114,7 @@ pub struct RateLimitConfig {
     pub calls: BucketConfig,
     pub registrations: BucketConfig,
     pub ws_messages: BucketConfig,
+    /// Maximum number of entries per rate-limit map before eviction.
     pub max_entries: usize,
 }
 
@@ -215,44 +216,27 @@ impl RateLimiter {
         inner.ws_messages.remove(peer_id);
     }
 
-    /// Evict stale buckets and enforce max_entries cap.
+    /// Evict stale buckets and enforce the max-entries cap.
+    ///
+    /// Buckets whose last refill was more than two refill intervals ago
+    /// are considered stale and removed. If a map still exceeds
+    /// `max_entries` after stale eviction, the oldest entries (by
+    /// insertion order) are dropped.
     pub async fn cleanup(&self) {
         let mut inner = self.inner.lock().await;
-        let max = inner.max_entries;
-        inner.calls.retain(|_, bucket| {
-            let now = Instant::now();
-            let elapsed = now.duration_since(bucket.last_refill).as_millis() as u64;
-            elapsed < bucket.config.refill_interval_ms * 2
-        });
-        while inner.calls.len() > max {
-            if let Some(key) = inner.calls.keys().next().cloned() {
-                inner.calls.remove(&key);
-            } else {
-                break;
-            }
-        }
-        inner.registrations.retain(|_, bucket| {
-            let now = Instant::now();
-            let elapsed = now.duration_since(bucket.last_refill).as_millis() as u64;
-            elapsed < bucket.config.refill_interval_ms * 2
-        });
-        while inner.registrations.len() > max {
-            if let Some(key) = inner.registrations.keys().next().cloned() {
-                inner.registrations.remove(&key);
-            } else {
-                break;
-            }
-        }
-        inner.ws_messages.retain(|_, bucket| {
-            let now = Instant::now();
-            let elapsed = now.duration_since(bucket.last_refill).as_millis() as u64;
-            elapsed < bucket.config.refill_interval_ms * 2
-        });
-        while inner.ws_messages.len() > max {
-            if let Some(key) = inner.ws_messages.keys().next().cloned() {
-                inner.ws_messages.remove(&key);
-            } else {
-                break;
+        let max = inner.config.max_entries;
+        for map in [&mut inner.calls, &mut inner.registrations, &mut inner.ws_messages] {
+            map.retain(|_, bucket| {
+                let now = Instant::now();
+                let elapsed = now.duration_since(bucket.last_refill).as_millis() as u64;
+                elapsed < bucket.config.refill_interval_ms * 2
+            });
+            while map.len() > max {
+                if let Some(key) = map.keys().next().cloned() {
+                    map.remove(&key);
+                } else {
+                    break;
+                }
             }
         }
     }

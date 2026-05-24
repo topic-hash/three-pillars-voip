@@ -9,8 +9,9 @@
 //!   6. Detects MASQUE relay need and coordinates
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
 use prost::Message;
@@ -43,9 +44,7 @@ pub async fn handle_ws_connection(
     let (tx, mut rx) = tokio::sync::mpsc::channel::<FramedMessage>(SESSION_CHANNEL_CAPACITY);
     let peer_id_holder: std::sync::Arc<tokio::sync::Mutex<Option<String>>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(Some(peer_id.clone())));
-
-    // Guard to ensure disconnect_peer is only called once
-    let disconnected = std::sync::Arc::new(AtomicBool::new(false));
+    let disconnected = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // Forward task: channel → WebSocket sender
     let state_fwd = state.clone();
@@ -63,9 +62,9 @@ pub async fn handle_ws_connection(
             }
         }
         // Channel closed — clean up
-        let pid = peer_id_fwd.lock().await;
-        if let Some(ref peer_id) = *pid {
-            if !disconnected_fwd.swap(true, Ordering::SeqCst) {
+        if disconnected_fwd.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            let pid = peer_id_fwd.lock().await;
+            if let Some(ref peer_id) = *pid {
                 state_fwd.disconnect_peer(peer_id).await;
             }
         }
@@ -75,15 +74,19 @@ pub async fn handle_ws_connection(
     let state_recv = state.clone();
     let tx_recv = tx.clone();
     let peer_id_recv = peer_id_holder.clone();
+    let disconnected_recv = disconnected.clone();
+
+    let ws_idle_timeout = Duration::from_secs(state_recv.inner.config.ws_idle_timeout_secs);
+    let mut idle_timeout = tokio::time::sleep(ws_idle_timeout);
+    tokio::pin!(idle_timeout);
 
     loop {
-        let idle_timeout = tokio::time::sleep(Duration::from_secs(300));
-        tokio::pin!(idle_timeout);
-
         tokio::select! {
             msg = ws_receiver.next() => {
                 match msg {
                     Some(Ok(axum::extract::ws::Message::Binary(data))) => {
+                        idle_timeout.as_mut().reset(Instant::now() + ws_idle_timeout);
+
                         if data.len() < 2 {
                             warn!(addr = %addr, "WS message too short");
                             continue;
@@ -120,31 +123,31 @@ pub async fn handle_ws_connection(
                         break;
                     }
                     Some(Ok(axum::extract::ws::Message::Ping(_))) => {
+                        idle_timeout.as_mut().reset(Instant::now() + ws_idle_timeout);
                         // axum handles Pong automatically
                     }
-                    Some(Ok(_)) => {}
+                    Some(Ok(_)) => {
+                        idle_timeout.as_mut().reset(Instant::now() + ws_idle_timeout);
+                    }
                     Some(Err(e)) => {
                         warn!(addr = %addr, error = %e, "WS receive error");
                         break;
                     }
-                    None => {
-                        // WebSocket stream ended
-                        break;
-                    }
+                    None => break,
                 }
             }
             _ = &mut idle_timeout => {
-                warn!(addr = %addr, "WebSocket idle timeout (300s)");
+                warn!(addr = %addr, "WS idle timeout, disconnecting");
                 break;
             }
         }
     }
 
     // Session ended — clean up
-    let pid = peer_id_recv.lock().await;
-    if let Some(ref peer_id) = *pid {
-        info!(peer_id, "WS session ended, disconnecting peer");
-        if !disconnected.swap(true, Ordering::SeqCst) {
+    if disconnected_recv.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+        let pid = peer_id_recv.lock().await;
+        if let Some(ref peer_id) = *pid {
+            info!(peer_id, "WS session ended, disconnecting peer");
             state_recv.disconnect_peer(peer_id).await;
         }
     }

@@ -93,7 +93,7 @@ pub fn production_client_config() -> Result<rustls::ClientConfig, rustls::Error>
     Ok(config)
 }
 
-/// Create a quinn ClientConfig with TLS and datagram support.
+/// Create a quinn ClientConfig with dangerous TLS and datagram support.
 ///
 /// Configures QUIC datagrams (RFC 9221) for MoQ media and sets
 /// idle timeout and datagram buffer sizes.

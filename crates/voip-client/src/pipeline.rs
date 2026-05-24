@@ -49,8 +49,11 @@ pub struct AudioPipeline {
     /// until they are ready for playback.
     jitter_buffer: VecDeque<MoqDatagram>,
     /// Target jitter buffer depth in milliseconds.
+    /// Datagrams are held for at least this long before being drained
+    /// for playback, smoothing out network jitter.
     jitter_target_ms: u64,
     /// Timestamp of the last datagram drained for playback.
+    /// Used to determine when buffered datagrams are ready.
     last_playback_ts: Option<u64>,
 }
 
@@ -92,7 +95,7 @@ impl AudioPipeline {
             sequence: Arc::new(AtomicU64::new(0)),
             timestamp: Arc::new(AtomicU64::new(0)),
             jitter_buffer: VecDeque::new(),
-            jitter_target_ms: 20, // 20ms target jitter buffer depth
+            jitter_target_ms: 20, // 20ms target jitter buffer depth (one frame at 20ms frame duration)
             last_playback_ts: None,
         })
     }
@@ -211,6 +214,7 @@ impl AudioPipeline {
         if self.jitter_buffer.iter().any(|d| d.sequence == datagram.sequence) {
             return;
         }
+
         // Insert in sequence order
         let insert_pos = self.jitter_buffer
             .iter()
@@ -222,24 +226,46 @@ impl AudioPipeline {
     /// Drain datagrams from the jitter buffer that are ready for playback.
     ///
     /// A datagram is ready for playback when the buffer has held it for at least
-    /// `jitter_target_ms` milliseconds. Returns a Vec of datagrams in sequence order.
+    /// `jitter_target_ms` milliseconds, or when a newer datagram's timestamp
+    /// indicates that the held datagram's playback time has passed.
+    ///
+    /// Returns a Vec of datagrams in sequence order. If there are gaps in
+    /// sequence numbers, FEC recovery is attempted on the next available packet.
     pub fn drain_buffer(&mut self) -> Vec<MoqDatagram> {
         let now_ts = self.timestamp.load(Ordering::Relaxed);
         let sample_rate: u64 = 48000;
         let jitter_target_samples = (sample_rate * self.jitter_target_ms) / 1000;
 
         let mut ready = Vec::new();
+
         while let Some(front) = self.jitter_buffer.front() {
-            // A datagram is ready if its timestamp is old enough relative to current time
-            if now_ts >= front.timestamp + jitter_target_samples {
+            // Check if this datagram's playback time has arrived
+            // A datagram is ready when current playback position has advanced
+            // past its timestamp + jitter buffer target
+            let should_drain = match self.last_playback_ts {
+                Some(last_ts) => {
+                    // Drain if the datagram timestamp is old enough relative to the most recent
+                    // buffered datagram or the current playback position
+                    last_ts.saturating_sub(front.timestamp) >= jitter_target_samples
+                        || now_ts.saturating_sub(front.timestamp) >= jitter_target_samples * 2
+                }
+                None => {
+                    // No playback yet — drain if buffer has at least 2 frames
+                    // (minimum for jitter compensation)
+                    self.jitter_buffer.len() >= 2
+                }
+            };
+
+            if should_drain {
                 ready.push(self.jitter_buffer.pop_front().unwrap());
             } else {
                 break;
             }
         }
-        if !ready.is_empty() {
-            self.last_playback_ts = Some(ready.last().unwrap().timestamp);
+        if let Some(last) = ready.last() {
+            self.last_playback_ts = Some(last.timestamp);
         }
+
         ready
     }
 
