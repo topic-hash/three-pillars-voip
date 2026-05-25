@@ -283,46 +283,52 @@ pub async fn try_simultaneous_open_full(
         ))
     });
 
-    // Race: first completion wins
-    // We use a channel to collect results from both tasks
-    let (tx, mut rx) = tokio::sync::mpsc::channel(2);
-
-    // Forward accept result
-    let tx_accept = tx.clone();
-    let ah = accept_handle;
-    tokio::spawn(async move {
-        let result = ah.await;
-        let _ = tx_accept.send(result).await;
-    });
-
-    // Forward connect result
-    let tx_connect = tx.clone();
-    let ch = connect_handle;
-    tokio::spawn(async move {
-        let result = ch.await;
-        let _ = tx_connect.send(result).await;
-    });
-
-    // Drop the original sender so rx sees closure when both forwarders finish
-    drop(tx);
-
-    // Collect results: return first success, or last error
+    // Race: use tokio::select! on both handles, aborting the loser on success
     let mut last_error = ConnectError::NetworkError("simultaneous open failed".to_string());
 
-    while let Some(result) = rx.recv().await {
-        match result {
-            Ok(Ok(conn)) => {
-                info!("Simultaneous open: connection established");
-                return Ok(conn);
+    tokio::pin!(accept_handle);
+    tokio::pin!(connect_handle);
+
+    loop {
+        tokio::select! {
+            res = &mut accept_handle => {
+                match res {
+                    Ok(Ok(conn)) => {
+                        info!("Simultaneous open: connection established via accept");
+                        connect_handle.abort();
+                        return Ok(conn);
+                    }
+                    Ok(Err(e)) => {
+                        debug!(error = %e, "Simultaneous open: accept side failed");
+                        last_error = e;
+                    }
+                    Err(e) => {
+                        debug!(error = %e, "Simultaneous open: accept task join error");
+                        last_error = ConnectError::NetworkError(format!("task error: {}", e));
+                    }
+                }
             }
-            Ok(Err(e)) => {
-                debug!(error = %e, "Simultaneous open: one side failed");
-                last_error = e;
+            res = &mut connect_handle => {
+                match res {
+                    Ok(Ok(conn)) => {
+                        info!("Simultaneous open: connection established via connect");
+                        accept_handle.abort();
+                        return Ok(conn);
+                    }
+                    Ok(Err(e)) => {
+                        debug!(error = %e, "Simultaneous open: connect side failed");
+                        last_error = e;
+                    }
+                    Err(e) => {
+                        debug!(error = %e, "Simultaneous open: connect task join error");
+                        last_error = ConnectError::NetworkError(format!("task error: {}", e));
+                    }
+                }
             }
-            Err(e) => {
-                debug!(error = %e, "Simultaneous open: task join error");
-                last_error = ConnectError::NetworkError(format!("task error: {}", e));
-            }
+        }
+        // If both sides have reported failure, break
+        if accept_handle.is_finished() && connect_handle.is_finished() {
+            break;
         }
     }
 

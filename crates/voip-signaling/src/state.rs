@@ -4,10 +4,12 @@
 //! rate-limiting state, MASQUE proxy coordination data,
 //! server Ed25519 signing key, and DHT bootstrap nodes.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use lru::LruCache;
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use prost::Message;
@@ -152,9 +154,9 @@ pub struct AppState {
 #[derive(Debug)]
 pub struct InnerState {
     /// Connected / registered peers.
-    pub peers: RwLock<HashMap<String, PeerEntry>>,
+    pub peers: RwLock<LruCache<String, PeerEntry>>,
     /// Active calls.
-    pub calls: RwLock<HashMap<String, CallEntry>>,
+    pub calls: RwLock<LruCache<String, CallEntry>>,
     /// Rate limiter.
     pub rate_limiter: RateLimiter,
     /// Known MASQUE proxies.
@@ -184,8 +186,8 @@ impl AppState {
         let dht_nodes = config.dht_bootstrap_nodes.clone();
         Self {
             inner: Arc::new(InnerState {
-                peers: RwLock::new(HashMap::new()),
-                calls: RwLock::new(HashMap::new()),
+                peers: RwLock::new(LruCache::new(NonZeroUsize::new(10_000).unwrap())),
+                calls: RwLock::new(LruCache::new(NonZeroUsize::new(1_000).unwrap())),
                 rate_limiter: RateLimiter::new(rate_limit_config),
                 proxies: RwLock::new(Vec::new()),
                 server_ips,
@@ -225,7 +227,7 @@ impl AppState {
             }
         } else {
             info!(peer_id = %peer_id, "peer registered");
-            peers.insert(
+            peers.put(
                 peer_id.clone(),
                 PeerEntry { info, sender },
             );
@@ -236,7 +238,7 @@ impl AppState {
     /// Unregister a peer (DELETE /v1/peers/{peer_id} or PeerUnregister message).
     pub async fn unregister_peer(&self, peer_id: &str) -> crate::error::Result<()> {
         let mut peers = self.inner.peers.write().await;
-        if peers.remove(peer_id).is_some() {
+        if peers.pop(peer_id).is_some() {
             info!(peer_id, "peer unregistered");
             self.inner.rate_limiter.remove_peer(peer_id).await;
         }
@@ -247,6 +249,10 @@ impl AppState {
     pub async fn disconnect_peer(&self, peer_id: &str) {
         let mut peers = self.inner.peers.write().await;
         if let Some(entry) = peers.get_mut(peer_id) {
+            if entry.sender.is_none() && entry.info.status == 1 {
+                debug!(peer_id, "disconnect_peer: already disconnected (idempotent)");
+                return;
+            }
             entry.sender = None;
             entry.info.status = 1; // PEER_OFFLINE
             info!(peer_id, "peer WebSocket disconnected, marked offline");
@@ -258,7 +264,7 @@ impl AppState {
 
     /// Look up a peer by peer_id. Returns a clone of the info.
     pub async fn get_peer(&self, peer_id: &str) -> Option<PeerInfo> {
-        let peers = self.inner.peers.read().await;
+        let mut peers = self.inner.peers.write().await;
         peers.get(peer_id).map(|e| e.info.clone())
     }
 
@@ -269,7 +275,7 @@ impl AppState {
         peer_id: &str,
         msg: FramedMessage,
     ) -> crate::error::Result<()> {
-        let peers = self.inner.peers.read().await;
+        let mut peers = self.inner.peers.write().await;
         let entry = peers
             .get(peer_id)
             .ok_or_else(|| SignalingError::UnknownPeer(peer_id.to_owned()))?;
@@ -291,23 +297,20 @@ impl AppState {
     /// Create a new call entry. Fails if the call_id already exists or
     /// either peer is unknown.
     pub async fn create_call(&self, call: CallEntry) -> crate::error::Result<()> {
-        // Validate caller and callee exist
-        {
-            let peers = self.inner.peers.read().await;
-            if !peers.contains_key(&call.caller_id) {
-                return Err(SignalingError::UnknownPeer(call.caller_id.clone()));
-            }
-            if !peers.contains_key(&call.callee_id) {
-                return Err(SignalingError::UnknownPeer(call.callee_id.clone()));
-            }
+        let mut peers = self.inner.peers.write().await;
+        if peers.get(&call.caller_id).is_none() {
+            return Err(SignalingError::UnknownPeer(call.caller_id.clone()));
         }
-
+        if peers.get(&call.callee_id).is_none() {
+            return Err(SignalingError::UnknownPeer(call.callee_id.clone()));
+        }
+        // peers lock still held — no gap for TOCTOU
         let mut calls = self.inner.calls.write().await;
-        if calls.contains_key(&call.call_id) {
+        if calls.get(&call.call_id).is_some() {
             return Err(SignalingError::CallAlreadyExists(call.call_id.clone()));
         }
         info!(call_id = %call.call_id, caller = %call.caller_id, callee = %call.callee_id, "call created");
-        calls.insert(call.call_id.clone(), call);
+        calls.put(call.call_id.clone(), call);
         Ok(())
     }
 
@@ -350,14 +353,14 @@ impl AppState {
     /// Remove a call from the active calls registry.
     pub async fn remove_call(&self, call_id: &str) {
         let mut calls = self.inner.calls.write().await;
-        if calls.remove(call_id).is_some() {
+        if calls.pop(call_id).is_some() {
             debug!(call_id, "call removed from registry");
         }
     }
 
     /// Get a call by ID.
     pub async fn get_call(&self, call_id: &str) -> Option<CallEntry> {
-        let calls = self.inner.calls.read().await;
+        let mut calls = self.inner.calls.write().await;
         calls.get(call_id).cloned()
     }
 

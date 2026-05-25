@@ -47,6 +47,12 @@ pub struct MasqueTunnel {
     call_id: String,
     /// Current tunnel state
     state: TunnelState,
+    /// H3 driver for HTTP/3 tunnels — must be kept alive so the h3
+    /// connection continues to make progress. Dropped when the tunnel is.
+    h3_driver: Option<h3::client::Connection<h3_quinn::Connection, Bytes>>,
+    /// Background server task for HTTP/2 loopback QUIC pair — must be
+    /// kept alive so the loopback bridge continues running.
+    _server_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl MasqueTunnel {
@@ -141,7 +147,7 @@ impl MasqueTunnel {
         // In a full implementation, these would be stored in the MasqueTunnel
         // struct and used for datagram exchange via h3's datagram API.
         // For now, we keep the QUIC connection and use its datagram API directly.
-        drop(h3_driver);
+        // h3_driver stored in tunnel to keep h3 connection alive
         drop(request_stream);
 
         Ok(Self {
@@ -150,6 +156,8 @@ impl MasqueTunnel {
             quic_conn,
             call_id: call_id.to_string(),
             state: TunnelState::Active,
+            h3_driver: Some(h3_driver),
+            _server_task: None,
         })
     }
 
@@ -212,7 +220,7 @@ impl MasqueTunnel {
         // The h2 connection driver must be kept alive in a background task.
         // The SendStream is used to write RFC 9297 capsules, and data
         // from the h2 RecvStream is forwarded as capsules to the server conn.
-        let loopback_conn = create_loopback_quic_pair(h2_result).await?;
+        let (loopback_conn, server_task) = create_loopback_quic_pair(h2_result).await?;
 
         Ok(Self {
             proxy_url: proxy_url.to_string(),
@@ -220,6 +228,8 @@ impl MasqueTunnel {
             quic_conn: loopback_conn,
             call_id: call_id.to_string(),
             state: TunnelState::Active,
+            h3_driver: None,
+            _server_task: Some(server_task),
         })
     }
 
@@ -498,7 +508,11 @@ async fn perform_tls_handshake(
     tcp_stream: tokio::net::TcpStream,
     host: &str,
 ) -> Result<tokio::io::BufStream<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>, MasqueError> {
+    #[cfg(debug_assertions)]
     let mut rustls_config = crate::tls::dangerous_client_config()
+        .map_err(|e| MasqueError::TlsError(format!("TLS config: {}", e)))?;
+    #[cfg(not(debug_assertions))]
+    let mut rustls_config = crate::tls::production_client_config()
         .map_err(|e| MasqueError::TlsError(format!("TLS config: {}", e)))?;
 
     // Set ALPN to h2 for HTTP/2 negotiation
@@ -524,11 +538,11 @@ async fn perform_tls_handshake(
 struct H2Tunnel {
     /// Handle to the background task driving the h2 connection.
     /// Must be kept alive for the send/recv streams to work.
-    _conn_task: tokio::task::JoinHandle<()>,
+    conn_task: tokio::task::JoinHandle<()>,
     /// The send stream for writing RFC 9297 §5 capsules to the proxy.
-    _send_stream: h2::SendStream<Bytes>,
+    send_stream: h2::SendStream<Bytes>,
     /// The response stream for reading data from the proxy.
-    _recv_stream: h2::RecvStream,
+    recv_stream: h2::RecvStream,
 }
 
 /// Perform HTTP/2 handshake with CONNECT-UDP extended connect.
@@ -620,9 +634,9 @@ async fn perform_h2_handshake(
     // the h2 connection.
 
     Ok(H2Tunnel {
-        _conn_task: conn_task,
-        _send_stream: send_stream,
-        _recv_stream: recv_stream,
+        conn_task,
+        send_stream,
+        recv_stream,
     })
 }
 
@@ -643,8 +657,8 @@ async fn perform_h2_handshake(
 /// would spawn background tasks to bridge the h2 send/recv streams with
 /// the server-side QUIC connection's datagram API.
 async fn create_loopback_quic_pair(
-    _h2_result: H2Tunnel,
-) -> Result<Connection, MasqueError> {
+    h2_result: H2Tunnel,
+) -> Result<(Connection, tokio::task::JoinHandle<()>), MasqueError> {
     // Create server endpoint on a random localhost port
     let server_config = crate::tls::dangerous_quinn_server_config()
         .map_err(|e| MasqueError::Http2Error(format!("server config: {}", e)))?;
@@ -702,9 +716,9 @@ async fn create_loopback_quic_pair(
     );
 
     // Keep the server task alive
-    drop(server_task);
+    let _ = h2_result; // keep H2Tunnel alive for bridge
 
-    Ok(client_conn)
+    Ok((client_conn, server_task))
 }
 
 // ==================== Common Helper Functions ====================

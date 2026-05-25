@@ -9,6 +9,8 @@
 //!   6. Detects MASQUE relay need and coordinates
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use prost::Message;
@@ -42,9 +44,13 @@ pub async fn handle_ws_connection(
     let peer_id_holder: std::sync::Arc<tokio::sync::Mutex<Option<String>>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(Some(peer_id.clone())));
 
+    // Guard to ensure disconnect_peer is only called once
+    let disconnected = std::sync::Arc::new(AtomicBool::new(false));
+
     // Forward task: channel → WebSocket sender
     let state_fwd = state.clone();
     let peer_id_fwd = peer_id_holder.clone();
+    let disconnected_fwd = disconnected.clone();
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             let bytes = msg.to_bytes();
@@ -59,59 +65,76 @@ pub async fn handle_ws_connection(
         // Channel closed — clean up
         let pid = peer_id_fwd.lock().await;
         if let Some(ref peer_id) = *pid {
-            state_fwd.disconnect_peer(peer_id).await;
+            if !disconnected_fwd.swap(true, Ordering::SeqCst) {
+                state_fwd.disconnect_peer(peer_id).await;
+            }
         }
     });
 
-    // Receive loop: WebSocket → message dispatch
+    // Receive loop: WebSocket → message dispatch (with idle timeout)
     let state_recv = state.clone();
     let tx_recv = tx.clone();
     let peer_id_recv = peer_id_holder.clone();
 
-    while let Some(msg) = ws_receiver.next().await {
-        match msg {
-            Ok(axum::extract::ws::Message::Binary(data)) => {
-                if data.len() < 2 {
-                    warn!(addr = %addr, "WS message too short");
-                    continue;
-                }
+    loop {
+        let idle_timeout = tokio::time::sleep(Duration::from_secs(300));
+        tokio::pin!(idle_timeout);
 
-                let framed = match FramedMessage::from_bytes(&data) {
-                    Some(f) => f,
-                    None => continue,
-                };
+        tokio::select! {
+            msg = ws_receiver.next() => {
+                match msg {
+                    Some(Ok(axum::extract::ws::Message::Binary(data))) => {
+                        if data.len() < 2 {
+                            warn!(addr = %addr, "WS message too short");
+                            continue;
+                        }
 
-                // Rate limit WS messages per peer
-                let pid = peer_id_recv.lock().await.clone();
-                if let Some(ref p_id) = pid
-                    && !state_recv.inner.rate_limiter.check_ws_message(p_id).await {
-                        let err = FramedMessage::error(
-                            codes::RATE_LIMITED,
-                            "WebSocket message rate limit exceeded",
-                        );
-                        let _ = tx_recv.send(err).await;
-                        continue;
+                        let framed = match FramedMessage::from_bytes(&data) {
+                            Some(f) => f,
+                            None => continue,
+                        };
+
+                        // Rate limit WS messages per peer
+                        let pid = peer_id_recv.lock().await.clone();
+                        if let Some(ref p_id) = pid
+                            && !state_recv.inner.rate_limiter.check_ws_message(p_id).await {
+                                let err = FramedMessage::error(
+                                    codes::RATE_LIMITED,
+                                    "WebSocket message rate limit exceeded",
+                                );
+                                let _ = tx_recv.send(err).await;
+                                continue;
+                            }
+
+                        dispatch_ws_message(
+                            framed,
+                            &addr,
+                            &tx_recv,
+                            &peer_id_recv,
+                            &state_recv,
+                        )
+                        .await;
                     }
-
-                dispatch_ws_message(
-                    framed,
-                    &addr,
-                    &tx_recv,
-                    &peer_id_recv,
-                    &state_recv,
-                )
-                .await;
+                    Some(Ok(axum::extract::ws::Message::Close(_))) => {
+                        info!(addr = %addr, "WebSocket closed by client");
+                        break;
+                    }
+                    Some(Ok(axum::extract::ws::Message::Ping(_))) => {
+                        // axum handles Pong automatically
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => {
+                        warn!(addr = %addr, error = %e, "WS receive error");
+                        break;
+                    }
+                    None => {
+                        // WebSocket stream ended
+                        break;
+                    }
+                }
             }
-            Ok(axum::extract::ws::Message::Close(_)) => {
-                info!(addr = %addr, "WebSocket closed by client");
-                break;
-            }
-            Ok(axum::extract::ws::Message::Ping(_)) => {
-                // axum handles Pong automatically
-            }
-            Ok(_) => {}
-            Err(e) => {
-                warn!(addr = %addr, error = %e, "WS receive error");
+            _ = &mut idle_timeout => {
+                warn!(addr = %addr, "WebSocket idle timeout (300s)");
                 break;
             }
         }
@@ -121,7 +144,9 @@ pub async fn handle_ws_connection(
     let pid = peer_id_recv.lock().await;
     if let Some(ref peer_id) = *pid {
         info!(peer_id, "WS session ended, disconnecting peer");
-        state_recv.disconnect_peer(peer_id).await;
+        if !disconnected.swap(true, Ordering::SeqCst) {
+            state_recv.disconnect_peer(peer_id).await;
+        }
     }
 }
 

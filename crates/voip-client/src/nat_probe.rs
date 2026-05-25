@@ -238,11 +238,13 @@ impl NATProber {
                             .as_millis() as u64;
                         c.cache_timestamp = now_ms;
                     }
-                    return Ok(self.cached_nat_info().await.unwrap_or_else(|| {
-                        // Fallback: full re-probe
-                        drop(cache_mut);
-                        futures::executor::block_on(self.probe()).unwrap_or_else(|_| NATInfo::no_nat())
-                    }));
+                    return Ok(match self.cached_nat_info().await {
+                        Some(info) => info,
+                        None => {
+                            drop(cache_mut);
+                            self.probe().await.unwrap_or_else(|_| NATInfo::no_nat())
+                        }
+                    });
                 }
             }
         }

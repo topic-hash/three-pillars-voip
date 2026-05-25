@@ -4,6 +4,8 @@
 //! The signaling server detects this condition and sends MasqueRelayNeeded
 //! (type ID 0x0300) to both peers with the proxy URL.
 
+use ed25519_dalek::Signer;
+use prost::Message;
 use voip_core::types::NATType;
 
 use crate::error::SignalingError;
@@ -58,31 +60,89 @@ pub async fn send_relay_needed(
         .await
         .ok_or(SignalingError::MasqueNoProxy)?;
 
-    use prost::Message;
-    let relay_msg = voip_core::proto::signaling::MasqueRelayNeeded {
+    // Issue a ProxyToken for the caller (peer_id=caller, target=callee)
+    let caller_token = issue_proxy_token(state, caller_id, callee_id);
+    // Issue a ProxyToken for the callee (peer_id=callee, target=caller)
+    let callee_token = issue_proxy_token(state, callee_id, caller_id);
+
+    // Build MasqueRelayNeeded for the caller
+    let caller_msg = voip_core::proto::signaling::MasqueRelayNeeded {
         call_id: call_id.to_owned(),
         proxy_url: proxy.proxy_url.clone(),
         wait_timeout_ms: 10_000,
+        proxy_token: Some(caller_token),
     };
-    let payload = relay_msg.encode_to_vec();
-
-    let framed = crate::state::FramedMessage {
+    let caller_payload = caller_msg.encode_to_vec();
+    let caller_framed = crate::state::FramedMessage {
         type_id: crate::state::type_id::MASQUE_RELAY_NEEDED,
-        payload,
+        payload: caller_payload,
+    };
+
+    // Build MasqueRelayNeeded for the callee
+    let callee_msg = voip_core::proto::signaling::MasqueRelayNeeded {
+        call_id: call_id.to_owned(),
+        proxy_url: proxy.proxy_url.clone(),
+        wait_timeout_ms: 10_000,
+        proxy_token: Some(callee_token),
+    };
+    let callee_payload = callee_msg.encode_to_vec();
+    let callee_framed = crate::state::FramedMessage {
+        type_id: crate::state::type_id::MASQUE_RELAY_NEEDED,
+        payload: callee_payload,
     };
 
     // Send to both peers. If either send fails, return an error.
-    state.send_to_peer(caller_id, framed.clone()).await?;
-    state.send_to_peer(callee_id, framed).await?;
+    state.send_to_peer(caller_id, caller_framed).await?;
+    state.send_to_peer(callee_id, callee_framed).await?;
 
     tracing::info!(
         call_id,
         caller_id,
         callee_id,
         proxy_url = %proxy.proxy_url,
-        "MasqueRelayNeeded sent to both peers"
+        "MasqueRelayNeeded sent to both peers (with ProxyTokens)"
     );
     Ok(())
+}
+
+/// Issue a signed ProxyToken for a peer using the server's Ed25519 signing key.
+///
+/// Creates a protobuf `ProxyToken` with the given peer_id and target_peer_id,
+/// signs it with the server's signing key, and returns the signed token.
+fn issue_proxy_token(
+    state: &AppState,
+    peer_id: &str,
+    target_peer_id: &str,
+) -> voip_core::proto::signaling::ProxyToken {
+    let ttl_seconds: u32 = 60;
+    let issued_at = crate::state::now_secs();
+
+    // Create the protobuf ProxyToken with an empty signature placeholder
+    let proxy_token = voip_core::proto::signaling::ProxyToken {
+        peer_id: peer_id.to_owned(),
+        target_peer_id: target_peer_id.to_owned(),
+        issued_at,
+        ttl_seconds,
+        signature: Vec::new(),
+    };
+
+    // Serialize without signature for signing
+    let mut token_for_signing = proxy_token.clone();
+    token_for_signing.signature.clear();
+    let data_to_sign = token_for_signing.encode_to_vec();
+
+    // Sign with server's Ed25519 signing key
+    let signature = state.inner.signing_key.sign(&data_to_sign);
+    let signature_bytes = signature.to_bytes().to_vec();
+
+    // Build the final token with signature
+    voip_core::proto::signaling::ProxyToken {
+        peer_id: peer_id.to_owned(),
+        target_peer_id: target_peer_id.to_owned(),
+        issued_at,
+        ttl_seconds,
+        signature: signature_bytes,
+    }
 }
 
 #[cfg(test)]

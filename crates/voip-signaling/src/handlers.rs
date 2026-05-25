@@ -245,7 +245,7 @@ pub async fn register_peer(
 /// the `{peer_id}` path parameter.
 #[utoipa::path(
     put,
-    path = "/v1/peers/{peer_id}",
+    path = "/v1/peers/:peer_id",
     request_body = RegisterPeerRequest,
     responses(
         (status = 200, description = "Peer updated successfully", body = PeerResponse),
@@ -335,7 +335,7 @@ pub async fn update_peer(
 /// the `{peer_id}` path parameter.
 #[utoipa::path(
     delete,
-    path = "/v1/peers/{peer_id}",
+    path = "/v1/peers/:peer_id",
     responses(
         (status = 204, description = "Peer unregistered successfully"),
         (status = 404, description = "Peer not found", body = ErrorResponse),
@@ -364,7 +364,7 @@ pub async fn unregister_peer(
 /// Requires JWT authentication.
 #[utoipa::path(
     get,
-    path = "/v1/peers/{peer_id}",
+    path = "/v1/peers/:peer_id",
     responses(
         (status = 200, description = "Peer information", body = PeerResponse),
         (status = 404, description = "Peer not found", body = ErrorResponse),
@@ -397,7 +397,7 @@ pub async fn get_peer(
 /// Requires JWT authentication.
 #[utoipa::path(
     get,
-    path = "/v1/peers/{peer_id}/status",
+    path = "/v1/peers/:peer_id/status",
     responses(
         (status = 200, description = "Peer status", body = PeerStatusResponse),
         (status = 404, description = "Peer not found", body = ErrorResponse),
@@ -440,15 +440,15 @@ pub async fn lookup_peer(
 ) -> crate::error::Result<Json<LookupResponse>> {
     // Search through peers by display_name (case-insensitive exact match).
     // In a production system this would be indexed; here we scan.
-    let peers = state.inner.peers.read().await;
+    let peers = state.inner.peers.write().await;
     let query_lower = query.username.to_lowercase();
 
-    let found = peers.values().find(|entry| {
+    let found = peers.iter().find(|(_, entry)| {
         entry.info.display_name.to_lowercase() == query_lower
     });
 
     match found {
-        Some(entry) => Ok(Json(LookupResponse {
+        Some((_, entry)) => Ok(Json(LookupResponse {
             peer_id: entry.info.peer_id.clone(),
             display_name: entry.info.display_name.clone(),
             status: peer_status_str(entry.info.status),

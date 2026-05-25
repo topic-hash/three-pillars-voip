@@ -9,6 +9,7 @@
 //!
 //! End-to-end latency target: <200ms on LAN.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -44,6 +45,13 @@ pub struct AudioPipeline {
     /// Timestamp counter (incremented by frame_size per frame)
     /// Timestamp is in sample-rate units (48000 Hz)
     timestamp: Arc<AtomicU64>,
+    /// Jitter buffer: holds incoming datagrams sorted by sequence number
+    /// until they are ready for playback.
+    jitter_buffer: VecDeque<MoqDatagram>,
+    /// Target jitter buffer depth in milliseconds.
+    jitter_target_ms: u64,
+    /// Timestamp of the last datagram drained for playback.
+    last_playback_ts: Option<u64>,
 }
 
 impl AudioPipeline {
@@ -83,6 +91,9 @@ impl AudioPipeline {
             remote_track_alias: remote_alias,
             sequence: Arc::new(AtomicU64::new(0)),
             timestamp: Arc::new(AtomicU64::new(0)),
+            jitter_buffer: VecDeque::new(),
+            jitter_target_ms: 20, // 20ms target jitter buffer depth
+            last_playback_ts: None,
         })
     }
 
@@ -188,6 +199,48 @@ impl AudioPipeline {
             .map_err(PipelineError::DecoderError)?;
 
         Ok(pcm)
+    }
+
+    /// Push a received MoQ datagram into the jitter buffer.
+    ///
+    /// Datagrams are sorted by sequence number. Duplicates (same sequence number)
+    /// are dropped. The buffer maintains ordering so that `drain_buffer()` can
+    /// return packets in playback order.
+    pub fn buffer_incoming(&mut self, datagram: MoqDatagram) {
+        // Drop duplicates
+        if self.jitter_buffer.iter().any(|d| d.sequence == datagram.sequence) {
+            return;
+        }
+        // Insert in sequence order
+        let insert_pos = self.jitter_buffer
+            .iter()
+            .position(|d| d.sequence > datagram.sequence)
+            .unwrap_or(self.jitter_buffer.len());
+        self.jitter_buffer.insert(insert_pos, datagram);
+    }
+
+    /// Drain datagrams from the jitter buffer that are ready for playback.
+    ///
+    /// A datagram is ready for playback when the buffer has held it for at least
+    /// `jitter_target_ms` milliseconds. Returns a Vec of datagrams in sequence order.
+    pub fn drain_buffer(&mut self) -> Vec<MoqDatagram> {
+        let now_ts = self.timestamp.load(Ordering::Relaxed);
+        let sample_rate: u64 = 48000;
+        let jitter_target_samples = (sample_rate * self.jitter_target_ms) / 1000;
+
+        let mut ready = Vec::new();
+        while let Some(front) = self.jitter_buffer.front() {
+            // A datagram is ready if its timestamp is old enough relative to current time
+            if now_ts >= front.timestamp + jitter_target_samples {
+                ready.push(self.jitter_buffer.pop_front().unwrap());
+            } else {
+                break;
+            }
+        }
+        if !ready.is_empty() {
+            self.last_playback_ts = Some(ready.last().unwrap().timestamp);
+        }
+        ready
     }
 
     /// Get the configured frame size in samples.

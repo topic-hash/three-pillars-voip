@@ -216,12 +216,12 @@ impl SignalingServer {
             .route("/v1/peers", post(handlers::register_peer))
             .route("/v1/peers/lookup", get(handlers::lookup_peer))
             .route(
-                "/v1/peers/{peer_id}",
+                "/v1/peers/:peer_id",
                 get(handlers::get_peer)
                     .put(handlers::update_peer)
                     .delete(handlers::unregister_peer),
             )
-            .route("/v1/peers/{peer_id}/status", get(handlers::get_peer_status))
+            .route("/v1/peers/:peer_id/status", get(handlers::get_peer_status))
             .route("/v1/myip", get(handlers::get_my_ip))
             .route("/v1/ws", get(handlers::ws_upgrade))
             .route("/v1/proxies", get(handlers::get_proxies))

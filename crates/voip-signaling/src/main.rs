@@ -100,6 +100,16 @@ async fn main() {
 
     info!("Signaling server ready — press Ctrl+C to shut down");
 
+    // Periodic rate limiter cleanup
+    let cleanup_state = server.state().clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_state.inner.rate_limiter.cleanup().await;
+        }
+    });
+
     axum::serve(
         listener,
         router.into_make_service_with_connect_info::<SocketAddr>(),

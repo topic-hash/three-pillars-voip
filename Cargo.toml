@@ -56,7 +56,8 @@ rustls-acme = "0.12"
 uniffi = "0.31"
 
 # Crypto
-ed25519-dalek = { version = "2", features = ["rand_core"] }
+ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
+lru = "0.12"
 rand = "0.8"
 
 # Logging

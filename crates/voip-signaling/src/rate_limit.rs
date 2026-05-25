@@ -104,6 +104,8 @@ struct RateLimiterInner {
     ws_messages: HashMap<String, Bucket>,
     /// Configuration.
     config: RateLimitConfig,
+    /// Maximum number of entries per bucket map before eviction.
+    max_entries: usize,
 }
 
 /// Top-level rate-limit configuration.
@@ -112,6 +114,7 @@ pub struct RateLimitConfig {
     pub calls: BucketConfig,
     pub registrations: BucketConfig,
     pub ws_messages: BucketConfig,
+    pub max_entries: usize,
 }
 
 impl Default for RateLimitConfig {
@@ -120,6 +123,7 @@ impl Default for RateLimitConfig {
             calls: BucketConfig::CALLS,
             registrations: BucketConfig::REGISTRATIONS,
             ws_messages: BucketConfig::WS_MESSAGES,
+            max_entries: 50_000,
         }
     }
 }
@@ -135,12 +139,14 @@ pub enum Action {
 
 impl RateLimiter {
     pub fn new(config: RateLimitConfig) -> Self {
+        let max_entries = config.max_entries;
         Self {
             inner: Arc::new(Mutex::new(RateLimiterInner {
                 calls: HashMap::new(),
                 registrations: HashMap::new(),
                 ws_messages: HashMap::new(),
                 config,
+                max_entries,
             })),
         }
     }
@@ -207,6 +213,48 @@ impl RateLimiter {
         inner.calls.remove(peer_id);
         inner.registrations.remove(peer_id);
         inner.ws_messages.remove(peer_id);
+    }
+
+    /// Evict stale buckets and enforce max_entries cap.
+    pub async fn cleanup(&self) {
+        let mut inner = self.inner.lock().await;
+        let max = inner.max_entries;
+        inner.calls.retain(|_, bucket| {
+            let now = Instant::now();
+            let elapsed = now.duration_since(bucket.last_refill).as_millis() as u64;
+            elapsed < bucket.config.refill_interval_ms * 2
+        });
+        while inner.calls.len() > max {
+            if let Some(key) = inner.calls.keys().next().cloned() {
+                inner.calls.remove(&key);
+            } else {
+                break;
+            }
+        }
+        inner.registrations.retain(|_, bucket| {
+            let now = Instant::now();
+            let elapsed = now.duration_since(bucket.last_refill).as_millis() as u64;
+            elapsed < bucket.config.refill_interval_ms * 2
+        });
+        while inner.registrations.len() > max {
+            if let Some(key) = inner.registrations.keys().next().cloned() {
+                inner.registrations.remove(&key);
+            } else {
+                break;
+            }
+        }
+        inner.ws_messages.retain(|_, bucket| {
+            let now = Instant::now();
+            let elapsed = now.duration_since(bucket.last_refill).as_millis() as u64;
+            elapsed < bucket.config.refill_interval_ms * 2
+        });
+        while inner.ws_messages.len() > max {
+            if let Some(key) = inner.ws_messages.keys().next().cloned() {
+                inner.ws_messages.remove(&key);
+            } else {
+                break;
+            }
+        }
     }
 }
 

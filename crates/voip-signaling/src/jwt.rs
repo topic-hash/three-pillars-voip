@@ -19,6 +19,8 @@ pub struct JwtClaims {
     pub iat: u64,
     /// Expiration time (unix seconds)
     pub exp: u64,
+    /// Not-before time (unix seconds)
+    pub nbf: u64,
     /// Ed25519 public key (hex-encoded)
     pub pub_key: String,
 }
@@ -54,6 +56,7 @@ pub fn create_jwt(
         sub: peer_id.to_owned(),
         iat: now,
         exp: now + expiry_secs,
+        nbf: now,
         pub_key: peer_id.to_owned(),
     };
 
@@ -120,6 +123,16 @@ pub fn verify_jwt(
         .as_secs();
     if claims.exp < now {
         return Err(SignalingError::InvalidJwt("token expired".to_owned()));
+    }
+
+    // Verify sub == pub_key: the peer ID IS the hex-encoded public key
+    if claims.sub != claims.pub_key {
+        return Err(SignalingError::InvalidJwt("sub claim does not match pub_key claim".to_owned()));
+    }
+
+    // Verify not-before time
+    if claims.nbf > now {
+        return Err(SignalingError::InvalidJwt("token not yet valid".to_owned()));
     }
 
     Ok(claims)
@@ -241,6 +254,7 @@ mod tests {
             sub: peer_id.clone(),
             iat: now - 100,
             exp: now - 10, // expired 10 seconds ago
+            nbf: now - 100,
             pub_key: peer_id.clone(),
         };
 
@@ -292,6 +306,80 @@ mod tests {
         let encoded = base64url_encode(data);
         let decoded = base64url_decode(&encoded).unwrap();
         assert_eq!(data.to_vec(), decoded);
+    }
+
+    #[test]
+    fn test_jwt_not_yet_valid() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let verifying_key = signing_key.verifying_key();
+        let peer_id = voip_core::crypto::peer_id_from_public_key(&verifying_key);
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // Create a token with nbf in the future
+        let claims = JwtClaims {
+            sub: peer_id.clone(),
+            iat: now - 100,
+            exp: now + 3600,
+            nbf: now + 3600, // not valid for another hour
+            pub_key: peer_id.clone(),
+        };
+
+        let payload_json = serde_json::to_string(&claims).unwrap();
+        let payload_b64 = crate::jwt::base64url_encode(payload_json.as_bytes());
+        let signing_input = format!("{}.{}", JWT_HEADER, payload_b64);
+
+        use ed25519_dalek::Signer;
+        let signature: Signature = signing_key.sign(signing_input.as_bytes());
+        let sig_b64 = crate::jwt::base64url_encode(signature.to_bytes().as_slice());
+
+        let token = format!("{}.{}.{}", JWT_HEADER, payload_b64, sig_b64);
+
+        let result = verify_jwt(&verifying_key, &token);
+        assert!(result.is_err());
+        match result {
+            Err(SignalingError::InvalidJwt(msg)) => {
+                assert!(msg.contains("not yet valid"), "Expected 'not yet valid' error, got: {}", msg);
+            }
+            _ => panic!("Expected InvalidJwt error"),
+        }
+    }
+
+    #[test]
+    fn test_jwt_sub_pubkey_mismatch() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let verifying_key = signing_key.verifying_key();
+        let peer_id = voip_core::crypto::peer_id_from_public_key(&verifying_key);
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // Create a token where sub != pub_key
+        let claims = JwtClaims {
+            sub: "different_peer_id".to_string(),
+            iat: now,
+            exp: now + 3600,
+            nbf: now,
+            pub_key: peer_id.clone(),
+        };
+
+        let payload_json = serde_json::to_string(&claims).unwrap();
+        let payload_b64 = crate::jwt::base64url_encode(payload_json.as_bytes());
+        let signing_input = format!("{}.{}", JWT_HEADER, payload_b64);
+
+        use ed25519_dalek::Signer;
+        let signature: Signature = signing_key.sign(signing_input.as_bytes());
+        let sig_b64 = crate::jwt::base64url_encode(signature.to_bytes().as_slice());
+
+        let token = format!("{}.{}.{}", JWT_HEADER, payload_b64, sig_b64);
+
+        let result = verify_jwt(&verifying_key, &token);
+        assert!(result.is_err());
     }
 
     #[test]

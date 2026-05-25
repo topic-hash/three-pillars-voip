@@ -25,6 +25,7 @@ thiserror = { workspace = true }
 quinn = { workspace = true }
 rustls = { workspace = true }
 rcgen = { workspace = true }
+lru = "0.12"
 utoipa = "5"
 utoipa-swagger-ui = { version = "8", features = ["axum"] }
 

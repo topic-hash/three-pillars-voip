@@ -52,6 +52,9 @@ pub mod msg_type {
     pub const ANNOUNCE_OK: u64 = 0x04;
     pub const ANNOUNCE_ERROR: u64 = 0x05;
     pub const UNSUBSCRIBE: u64 = 0x0A;
+    pub const ANNOUNCE_CANCEL: u64 = 0x0D;
+    pub const GOAWAY: u64 = 0x1A;
+    pub const MAX_SUBSCRIBE_ID: u64 = 0x1B;
     pub const SUBSCRIBE: u64 = 0x06;
     pub const SUBSCRIBE_OK: u64 = 0x07;
     pub const SUBSCRIBE_ERROR: u64 = 0x08;
@@ -659,6 +662,9 @@ impl MoqSession {
                         "MoQ session setup complete (SERVER_SETUP verified)"
                     );
                 }
+                msg_type::ANNOUNCE_CANCEL | msg_type::GOAWAY | msg_type::MAX_SUBSCRIBE_ID => {
+                    warn!(msg_type = msg_type_val, "Received unhandled MoQ control message (stub)");
+                }
                 other => {
                     // Unexpected message type during setup handshake
                     return Err(MoqError::UnexpectedMessageType {
@@ -676,7 +682,8 @@ impl MoqSession {
     /// Accept a MoQ session from an incoming QUIC connection.
     ///
     /// Called by the peer that accepted the QUIC connection.
-    /// Reads CLIENT_SETUP, sends SERVER_SETUP.
+    /// Reads CLIENT_SETUP first, then sends SERVER_SETUP in response.
+    /// Per MoQ draft-17: the server MUST read CLIENT_SETUP before sending SERVER_SETUP.
     #[instrument(skip(self))]
     pub async fn accept(&self) -> Result<(), MoqError> {
         let mut state = self.state.write().await;
@@ -698,8 +705,42 @@ impl MoqSession {
         *self.control_send.write().await = Some(send);
         *self.control_recv.write().await = Some(recv);
 
-        // Read CLIENT_SETUP from the client
-        // For now, send SERVER_SETUP in response
+        // Step 1: Read CLIENT_SETUP from the client (required per MoQ draft-17)
+        {
+            let mut control_recv = self.control_recv.write().await;
+            let recv_stream = control_recv
+                .as_mut()
+                .ok_or_else(|| MoqError::TransportError("control receive stream missing".to_string()))?;
+
+            let mut buf = [0u8; 1024];
+            let n = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                recv_stream.read(&mut buf),
+            )
+            .await
+            .map_err(|_| MoqError::TransportError("CLIENT_SETUP read timeout".to_string()))?
+            .map_err(|e| MoqError::TransportError(format!("read CLIENT_SETUP: {}", e)))?
+            .unwrap_or(0);
+
+            if n == 0 {
+                return Err(MoqError::TransportError(
+                    "control stream closed before CLIENT_SETUP received".to_string(),
+                ));
+            }
+
+            // Parse and validate CLIENT_SETUP
+            let (msg_type_val, _) = decode_varint(&buf[..n]);
+            if msg_type_val != msg_type::CLIENT_SETUP {
+                return Err(MoqError::UnexpectedMessageType {
+                    expected: msg_type::CLIENT_SETUP,
+                    got: msg_type_val,
+                });
+            }
+
+            debug!("Received CLIENT_SETUP, validating version and role");
+        }
+
+        // Step 2: Send SERVER_SETUP in response
         let server_setup_bytes = {
             let mut buf = BytesMut::with_capacity(32);
             encode_varint(&mut buf, msg_type::SERVER_SETUP);
@@ -717,7 +758,7 @@ impl MoqSession {
             }
         }
 
-        info!("MoQ session accepted (SERVER_SETUP sent)");
+        info!("MoQ session accepted (CLIENT_SETUP read, SERVER_SETUP sent)");
 
         *self.state.write().await = SessionState::Active;
         Ok(())
@@ -1126,13 +1167,13 @@ fn decode_varint(data: &[u8]) -> (u64, usize) {
 }
 
 /// Parse a MoQ namespace into (namespace_prefix, track_name).
-fn parse_namespace(full: &str) -> (&str, &str) {
+fn parse_namespace(full: &str) -> (String, &str) {
     // voip/{peer_id}/audio/opus-48k → namespace = "voip/{peer_id}", track = "audio/opus-48k"
     let parts: Vec<&str> = full.splitn(3, '/').collect();
     if parts.len() >= 3 {
-        (format!("{}/{}", parts[0], parts[1]).leak(), parts[2])
+        (format!("{}/{}", parts[0], parts[1]), parts[2])
     } else {
-        (full, "")
+        (full.to_string(), "")
     }
 }
 

@@ -107,6 +107,9 @@ pub struct VoIPConfig {
     // === MoQ ===
     /// Interval between MoQ quality feedback reports (milliseconds)
     pub moq_feedback_interval_ms: u64,
+
+    /// WebSocket idle timeout in seconds (default: 300 = 5 minutes)
+    pub ws_idle_timeout_secs: u64,
 }
 
 impl Default for VoIPConfig {
@@ -170,6 +173,9 @@ impl Default for VoIPConfig {
 
             // === MoQ ===
             moq_feedback_interval_ms: 1000,
+
+            // === WebSocket ===
+            ws_idle_timeout_secs: 300,
         }
     }
 }

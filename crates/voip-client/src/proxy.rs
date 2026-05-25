@@ -617,11 +617,13 @@ impl ProxyToken {
     ///
     /// Format: `peer_id || proxy_url || expires_at_be || issued_at_be`
     fn signing_message(peer_id: &str, proxy_url: &str, expires_at: u64, issued_at: u64) -> Vec<u8> {
-        let mut msg = Vec::with_capacity(
-            peer_id.len() + proxy_url.len() + 8 + 8,
-        );
-        msg.extend_from_slice(peer_id.as_bytes());
-        msg.extend_from_slice(proxy_url.as_bytes());
+        let peer_id_bytes = peer_id.as_bytes();
+        let proxy_url_bytes = proxy_url.as_bytes();
+        let mut msg = Vec::with_capacity(4 + peer_id_bytes.len() + 4 + proxy_url_bytes.len() + 8 + 8);
+        msg.extend_from_slice(&(peer_id_bytes.len() as u32).to_be_bytes());
+        msg.extend_from_slice(peer_id_bytes);
+        msg.extend_from_slice(&(proxy_url_bytes.len() as u32).to_be_bytes());
+        msg.extend_from_slice(proxy_url_bytes);
         msg.extend_from_slice(&expires_at.to_be_bytes());
         msg.extend_from_slice(&issued_at.to_be_bytes());
         msg

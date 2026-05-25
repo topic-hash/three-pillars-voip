@@ -68,6 +68,7 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
 /// Used for development and DHT trust-on-first-use certificate validation.
 /// The `dangerous()` API is required because we need to accept self-signed
 /// certificates from volunteer MASQUE proxies.
+#[cfg(debug_assertions)]
 pub fn dangerous_client_config() -> Result<rustls::ClientConfig, rustls::Error> {
     let config = rustls::ClientConfig::builder()
         .dangerous()
@@ -76,12 +77,34 @@ pub fn dangerous_client_config() -> Result<rustls::ClientConfig, rustls::Error> 
     Ok(config)
 }
 
-/// Create a quinn ClientConfig with dangerous TLS and datagram support.
+/// Create a rustls ClientConfig that verifies certificates against the system trust store.
+///
+/// Used in production builds where the signaling server and MASQUE proxies
+/// present valid TLS certificates signed by well-known CAs.
+#[cfg(not(debug_assertions))]
+pub fn production_client_config() -> Result<rustls::ClientConfig, rustls::Error> {
+    let root_store = rustls_native_certs::load_native_certs()
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| rustls::Error::General(format!("failed to load native certs: {}", e)))?;
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    Ok(config)
+}
+
+/// Create a quinn ClientConfig with TLS and datagram support.
 ///
 /// Configures QUIC datagrams (RFC 9221) for MoQ media and sets
 /// idle timeout and datagram buffer sizes.
+/// In debug builds uses the dangerous (no verification) TLS config.
+/// In release builds uses the production TLS config with system trust store.
 pub fn dangerous_quinn_client_config() -> Result<quinn::ClientConfig, String> {
+    #[cfg(debug_assertions)]
     let rustls_config = dangerous_client_config()
+        .map_err(|e| format!("TLS config: {}", e))?;
+    #[cfg(not(debug_assertions))]
+    let rustls_config = production_client_config()
         .map_err(|e| format!("TLS config: {}", e))?;
 
     let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(rustls_config)
@@ -95,7 +118,7 @@ pub fn dangerous_quinn_client_config() -> Result<quinn::ClientConfig, String> {
 
     let idle_timeout = std::time::Duration::from_secs(30);
     transport.max_idle_timeout(Some(
-        quinn::IdleTimeout::try_from(idle_timeout).unwrap(),
+        quinn::IdleTimeout::try_from(idle_timeout).expect("idle timeout exceeds quinn maximum"),
     ));
 
     client_config.transport_config(std::sync::Arc::new(transport));
