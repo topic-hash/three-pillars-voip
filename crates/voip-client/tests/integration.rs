@@ -6,7 +6,6 @@
 use voip_core::state::CallStateMachine;
 use voip_core::types::{
     CallEndReason, ConnectionMethod, DiscoveryMethod, NATType,
-    PredictionConfidence,
 };
 use voip_core::config::VoIPConfig;
 use voip_core::crypto::{generate_connection_id, generate_ed25519_keypair, peer_id_from_public_key};

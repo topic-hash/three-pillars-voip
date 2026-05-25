@@ -702,12 +702,12 @@ async fn create_loopback_quic_pair(
             loop {
                 // Read DATA frame from h2 recv_stream
                 let data = match recv_stream.data().await {
-                    Ok(Some(data)) => data,
-                    Ok(None) => break, // stream ended
-                    Err(e) => {
+                    Some(Ok(data)) => data,
+                    Some(Err(e)) => {
                         debug!(error = %e, "h2 recv_stream data read error");
                         break;
                     }
+                    None => break, // stream closed
                 };
 
                 // Decode the RFC 9297 capsule
@@ -736,7 +736,7 @@ async fn create_loopback_quic_pair(
                         // Encode as RFC 9297 capsule
                         let capsule = encode_datagram_capsule(&data);
                         // Send as h2 DATA frame
-                        send_stream.send_data(capsule).unwrap_or_else(|e| {
+                        send_stream.send_data(capsule, false).unwrap_or_else(|e| {
                             debug!(error = %e, "Failed to send h2 DATA frame");
                         });
                         send_stream.reserve_capacity(data.len());

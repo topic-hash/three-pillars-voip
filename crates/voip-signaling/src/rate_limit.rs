@@ -225,18 +225,23 @@ impl RateLimiter {
     pub async fn cleanup(&self) {
         let mut inner = self.inner.lock().await;
         let max = inner.config.max_entries;
-        for map in [&mut inner.calls, &mut inner.registrations, &mut inner.ws_messages] {
-            map.retain(|_, bucket| {
-                let now = Instant::now();
-                let elapsed = now.duration_since(bucket.last_refill).as_millis() as u64;
-                elapsed < bucket.config.refill_interval_ms * 2
-            });
-            while map.len() > max {
-                if let Some(key) = map.keys().next().cloned() {
-                    map.remove(&key);
-                } else {
-                    break;
-                }
+        Self::cleanup_map(&mut inner.calls, max);
+        Self::cleanup_map(&mut inner.registrations, max);
+        Self::cleanup_map(&mut inner.ws_messages, max);
+    }
+
+    /// Evict stale and overflow entries from a single rate-limit map.
+    fn cleanup_map(map: &mut HashMap<String, Bucket>, max: usize) {
+        map.retain(|_, bucket| {
+            let now = Instant::now();
+            let elapsed = now.duration_since(bucket.last_refill).as_millis() as u64;
+            elapsed < bucket.config.refill_interval_ms * 2
+        });
+        while map.len() > max {
+            if let Some(key) = map.keys().next().cloned() {
+                map.remove(&key);
+            } else {
+                break;
             }
         }
     }

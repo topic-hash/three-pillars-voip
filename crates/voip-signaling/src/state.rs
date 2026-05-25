@@ -297,7 +297,7 @@ impl AppState {
     /// Create a new call entry. Fails if the call_id already exists or
     /// either peer is unknown.
     pub async fn create_call(&self, call: CallEntry) -> crate::error::Result<()> {
-        let mut peers = self.inner.peers.write().await;
+        let peers = self.inner.peers.write().await;
         if !peers.contains(&call.caller_id) {
             return Err(SignalingError::UnknownPeer(call.caller_id.clone()));
         }

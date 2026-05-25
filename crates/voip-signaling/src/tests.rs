@@ -46,6 +46,7 @@ fn test_server_low_limits() -> crate::server::SignalingServer {
             refill_amount: 5,
             refill_interval_ms: 1_000,
         },
+        max_entries: 1000,
     };
     crate::server::SignalingServer::builder()
         .listen_addr("0.0.0.0:0")
@@ -196,7 +197,7 @@ fn setup_authenticated_server() -> (crate::server::SignalingServer, axum::Router
     let peer_id = peer_id_from_public_key(&verifying_key);
 
     // Register the peer directly via AppState
-    let info = crate::state::PeerInfo {
+    let _info = crate::state::PeerInfo {
         peer_id: peer_id.clone(),
         display_name: "AuthPeer".to_string(),
         ipv6_addresses: vec![],
@@ -208,7 +209,7 @@ fn setup_authenticated_server() -> (crate::server::SignalingServer, axum::Router
     };
 
     // We need to register async, so use block_on pattern via tokio
-    let state = server.state().clone();
+    let _state = server.state().clone();
     let peer_id_clone = peer_id.clone();
 
     // Issue JWT token using the server's signing key
@@ -533,7 +534,7 @@ async fn test_lookup_peer() {
     state.register_peer(info, None).await.unwrap();
 
     // Lookup by scanning peers (same logic as handlers::lookup_peer)
-    let mut peers = state.inner.peers.write().await;
+    let peers = state.inner.peers.write().await;
     let found = peers.iter().find(|(_, e)| e.info.display_name == "LookupUser").map(|(_, e)| e);
     assert!(found.is_some());
     let entry = found.unwrap();
@@ -563,7 +564,7 @@ async fn test_lookup_peer_case_insensitive() {
     state.register_peer(info, None).await.unwrap();
 
     // Case-insensitive lookup (same logic as handlers::lookup_peer)
-    let mut peers = state.inner.peers.write().await;
+    let peers = state.inner.peers.write().await;
     let query_lower = "caseuser".to_lowercase();
     let found = peers.iter().find(|(_, e)| e.info.display_name.to_lowercase() == query_lower).map(|(_, e)| e);
     assert!(found.is_some());
@@ -635,6 +636,7 @@ async fn test_jwt_expired_token_rejected() {
         sub: peer_id.clone(),
         iat: now - 200,
         exp: now - 100, // expired 100 seconds ago
+        nbf: now - 200,
         pub_key: peer_id,
     };
     let payload_json = serde_json::to_string(&claims).unwrap();
@@ -848,7 +850,7 @@ async fn test_rate_limit_registration() {
         },
         ..Default::default()
     };
-    let mut limiter = crate::rate_limit::RateLimiter::new(config);
+    let limiter = crate::rate_limit::RateLimiter::new(config);
 
     // First two should succeed
     assert!(limiter.check_registration("rl-peer").await);
@@ -1161,7 +1163,7 @@ async fn test_error_rate_limited_code_2001() {
         },
         ..Default::default()
     };
-    let mut limiter = crate::rate_limit::RateLimiter::new(config);
+    let limiter = crate::rate_limit::RateLimiter::new(config);
 
     assert!(limiter.check_registration("rl-code-peer").await);
     assert!(limiter.check_registration("rl-code-peer").await);

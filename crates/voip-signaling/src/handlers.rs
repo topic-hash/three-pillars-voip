@@ -440,7 +440,7 @@ pub async fn lookup_peer(
 ) -> crate::error::Result<Json<LookupResponse>> {
     // Search through peers by display_name (case-insensitive exact match).
     // In a production system this would be indexed; here we scan.
-    let mut peers = state.inner.peers.write().await;
+    let peers = state.inner.peers.write().await;
     let query_lower = query.username.to_lowercase();
 
     let found = peers.iter().find(|(_, entry)| {

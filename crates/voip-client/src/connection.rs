@@ -284,7 +284,7 @@ pub async fn try_simultaneous_open_full(
     });
 
     // Race: use tokio::select! on both handles, aborting the loser on success
-    let mut last_error = ConnectError::NetworkError("simultaneous open failed".to_string());
+    let mut last_error = ConnectError::NetworkError("simultaneous open failed".into());
 
     tokio::pin!(accept_handle);
     tokio::pin!(connect_handle);

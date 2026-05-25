@@ -58,9 +58,6 @@ pub mod msg_type {
     pub const SUBSCRIBE: u64 = 0x06;
     pub const SUBSCRIBE_OK: u64 = 0x07;
     pub const SUBSCRIBE_ERROR: u64 = 0x08;
-    pub const ANNOUNCE_CANCEL: u64 = 0x0D;
-    pub const GOAWAY: u64 = 0x1A;
-    pub const MAX_SUBSCRIBE_ID: u64 = 0x1B;
     pub const TRACK_UPDATE: u64 = 0x10;
     pub const CONNECTION_MIGRATION: u64 = 0x20;
 }

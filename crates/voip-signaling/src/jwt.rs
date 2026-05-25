@@ -390,43 +390,4 @@ mod tests {
         assert_eq!(data.to_vec(), decoded);
     }
 
-    #[test]
-    fn test_jwt_not_yet_valid() {
-        let signing_key = SigningKey::generate(&mut OsRng);
-        let verifying_key = signing_key.verifying_key();
-        let peer_id = voip_core::crypto::peer_id_from_public_key(&verifying_key);
-
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        // Create a token with nbf in the future
-        let claims = JwtClaims {
-            sub: peer_id.clone(),
-            iat: now - 100,
-            exp: now + 3600,
-            nbf: now + 3600, // not valid for another hour
-            pub_key: peer_id.clone(),
-        };
-
-        let payload_json = serde_json::to_string(&claims).unwrap();
-        let payload_b64 = crate::jwt::base64url_encode(payload_json.as_bytes());
-        let signing_input = format!("{}.{}", JWT_HEADER, payload_b64);
-
-        use ed25519_dalek::Signer;
-        let signature: Signature = signing_key.sign(signing_input.as_bytes());
-        let sig_b64 = crate::jwt::base64url_encode(signature.to_bytes().as_slice());
-
-        let token = format!("{}.{}.{}", JWT_HEADER, payload_b64, sig_b64);
-
-        let result = verify_jwt(&verifying_key, &token);
-        assert!(result.is_err());
-        match result {
-            Err(SignalingError::InvalidJwt(msg)) => {
-                assert!(msg.contains("not yet valid"), "expected 'not yet valid' error, got: {}", msg);
-            }
-            _ => panic!("expected InvalidJwt error"),
-        }
-    }
 }

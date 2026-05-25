@@ -11,7 +11,8 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use futures::{SinkExt, StreamExt};
 use prost::Message;
@@ -77,7 +78,7 @@ pub async fn handle_ws_connection(
     let disconnected_recv = disconnected.clone();
 
     let ws_idle_timeout = Duration::from_secs(state_recv.inner.config.ws_idle_timeout_secs);
-    let mut idle_timeout = tokio::time::sleep(ws_idle_timeout);
+    let idle_timeout = tokio::time::sleep(ws_idle_timeout);
     tokio::pin!(idle_timeout);
 
     loop {
