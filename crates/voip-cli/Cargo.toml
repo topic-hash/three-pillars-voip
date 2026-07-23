@@ -24,6 +24,8 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 dirs = "5"
+quinn = { workspace = true }
+rustls = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -66,10 +66,42 @@ enum Commands {
         #[arg(short, long, default_value = "0.0.0.0:4433")]
         listen: String,
     },
+    /// Place a P2P call to another peer.
+    ///
+    /// Looks up the target peer via signaling, opens a QUIC connection
+    /// to their reported address, sends a "ping" message on a bidi
+    /// stream, and prints the reply. Optionally specify the peer's
+    /// QUIC address directly with --direct-addr if signaling has no
+    /// address record (common when the target registered behind NAT).
+    Call {
+        /// Signaling server base URL.
+        url: String,
+        /// Target peer_id (64-char hex).
+        peer_id: String,
+        /// Message to send (default: "ping").
+        #[arg(short, long, default_value = "ping")]
+        message: String,
+        /// Override the peer's QUIC address directly (e.g. "127.0.0.1:4433").
+        /// Bypasses signaling lookup of addresses. Useful when the
+        /// target registered without reporting addresses.
+        #[arg(long)]
+        direct_addr: Option<String>,
+        /// QUIC listen address for the caller (usually ephemeral).
+        #[arg(long, default_value = "0.0.0.0:0")]
+        listen: String,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Install the ring CryptoProvider as the process-default for rustls.
+    // Required by rustls 0.23's builder API (used in voip_client::tls).
+    // Without this, ClientConfig::builder() panics with
+    // "Could not automatically determine the process-level CryptoProvider".
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls ring CryptoProvider");
+
     let cli = Cli::parse();
 
     // Initialize tracing
@@ -94,6 +126,9 @@ async fn main() -> Result<()> {
         }
         Commands::Listen { url, display_name, listen } => {
             commands::listen(&url, &display_name, &listen).await
+        }
+        Commands::Call { url, peer_id, message, direct_addr, listen } => {
+            commands::call(&url, &peer_id, &message, direct_addr, &listen).await
         }
     }
 }
