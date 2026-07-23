@@ -1437,3 +1437,73 @@ fn test_is_retryable_reason() {
     assert!(!crate::push::is_retryable_reason(2)); // Timeout
     assert!(!crate::push::is_retryable_reason(5)); // FailedNetwork
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// 11. Configuration regression tests (REG-01: hardcoded listen port)
+//
+// Regression: main.rs hardcoded "0.0.0.0:8443" with no env-var override,
+// making it impossible to run two signaling instances on the same host
+// (required for the local + codespace distributed test scenario).
+// Fix: extract resolve_listen_addr() that reads LISTEN_ADDR env var.
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_resolve_listen_addr_default_when_env_unset() {
+    // When LISTEN_ADDR is not set, the default "0.0.0.0:8443" must be used.
+    // Save and restore the env var to keep the test hermetic.
+    // SAFETY: env mutation are process-wide; we restore the original value
+    // before returning. Tests are single-threaded by default unless explicitly
+    // parallelized, and these tests don't run concurrently with each other.
+    let saved = std::env::var("LISTEN_ADDR").ok();
+    unsafe { std::env::remove_var("LISTEN_ADDR") };
+
+    let addr = crate::server::resolve_listen_addr();
+    assert_eq!(
+        addr, "0.0.0.0:8443",
+        "default listen address must be 0.0.0.0:8443 when LISTEN_ADDR is unset"
+    );
+
+    if let Some(v) = saved {
+        unsafe { std::env::set_var("LISTEN_ADDR", v) };
+    }
+}
+
+#[test]
+fn test_resolve_listen_addr_reads_env_var() {
+    // When LISTEN_ADDR is set, resolve_listen_addr() must return it verbatim.
+    // This is the override path used to run a second instance on port 9443.
+    // SAFETY: see test_resolve_listen_addr_default_when_env_unset.
+    let saved = std::env::var("LISTEN_ADDR").ok();
+    unsafe { std::env::set_var("LISTEN_ADDR", "0.0.0.0:9443") };
+
+    let addr = crate::server::resolve_listen_addr();
+    assert_eq!(
+        addr, "0.0.0.0:9443",
+        "LISTEN_ADDR env var must override the default listen address"
+    );
+
+    match saved {
+        Some(v) => unsafe { std::env::set_var("LISTEN_ADDR", v) },
+        None => unsafe { std::env::remove_var("LISTEN_ADDR") },
+    }
+}
+
+#[test]
+fn test_resolve_listen_addr_invalid_falls_back_to_default() {
+    // Defensive: an invalid LISTEN_ADDR must not panic; it must fall back
+    // to the default. This guards against crashes from misconfigured envs.
+    // SAFETY: see test_resolve_listen_addr_default_when_env_unset.
+    let saved = std::env::var("LISTEN_ADDR").ok();
+    unsafe { std::env::set_var("LISTEN_ADDR", "not-a-valid-addr") };
+
+    let addr = crate::server::resolve_listen_addr();
+    assert_eq!(
+        addr, "0.0.0.0:8443",
+        "invalid LISTEN_ADDR must fall back to default, not panic"
+    );
+
+    match saved {
+        Some(v) => unsafe { std::env::set_var("LISTEN_ADDR", v) },
+        None => unsafe { std::env::remove_var("LISTEN_ADDR") },
+    }
+}

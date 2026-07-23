@@ -53,6 +53,11 @@ async fn main() {
 
     info!("Three Pillars VoIP Signaling Server starting...");
 
+    // Resolve listen address from LISTEN_ADDR env var (REG-01 fix).
+    // Falls back to "0.0.0.0:8443" when unset or invalid.
+    let listen_addr = server::resolve_listen_addr();
+    info!(%listen_addr, "resolved listen address");
+
     // Build VoIP config with server IPs
     let mut voip_config = voip_core::VoIPConfig::default();
     voip_config.signaling_server_ips = DEFAULT_SERVER_IPS
@@ -62,7 +67,7 @@ async fn main() {
 
     // Build the signaling server
     let server = SignalingServer::builder()
-        .listen_addr("0.0.0.0:8443")
+        .listen_addr(listen_addr.clone())
         .server_ips(
             DEFAULT_SERVER_IPS
                 .iter()

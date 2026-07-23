@@ -26,6 +26,39 @@ use crate::state::AppState;
 /// Default HTTP listen port for the signaling server.
 const DEFAULT_PORT: u16 = 8443;
 
+/// Default listen address used when `LISTEN_ADDR` is not set or invalid.
+pub const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:8443";
+
+/// Resolve the listen address from the `LISTEN_ADDR` environment variable,
+/// falling back to [`DEFAULT_LISTEN_ADDR`] when unset or invalid.
+///
+/// This is the configuration entry point used by `main.rs` so that two
+/// signaling instances can run on the same host (e.g., local on `0.0.0.0:8443`
+/// and codespace on `0.0.0.0:9443`) by setting `LISTEN_ADDR=0.0.0.0:9443`.
+///
+/// # Validation
+///
+/// The value must parse as a `SocketAddr` (i.e. `ip:port`). Any parse failure
+/// is logged at `warn` level and the default is returned — never panics.
+pub fn resolve_listen_addr() -> String {
+    match std::env::var("LISTEN_ADDR") {
+        Ok(raw) => {
+            // Validate that the value parses as a socket address.
+            if raw.parse::<std::net::SocketAddr>().is_ok() {
+                raw
+            } else {
+                tracing::warn!(
+                    value = %raw,
+                    "LISTEN_ADDR env var is not a valid SocketAddr (expected 'ip:port'); \
+                     falling back to default {DEFAULT_LISTEN_ADDR}"
+                );
+                DEFAULT_LISTEN_ADDR.to_string()
+            }
+        }
+        Err(_) => DEFAULT_LISTEN_ADDR.to_string(),
+    }
+}
+
 // ── OpenAPI specification ────────────────────────────────────────────────
 
 /// OpenAPI specification for the signaling server REST API.
