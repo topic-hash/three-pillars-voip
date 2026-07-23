@@ -1,0 +1,29 @@
+[package]
+name = "voip-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "voip-cli"
+path = "src/main.rs"
+
+[dependencies]
+voip-core = { path = "../voip-core" }
+voip-client = { path = "../voip-client" }
+tokio = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+hex = "0.4"
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+dirs = "5"
+
+[dev-dependencies]
+tempfile = "3"
