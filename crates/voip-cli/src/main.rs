@@ -50,6 +50,22 @@ enum Commands {
         #[arg(short, long, default_value = "voip-cli-peer")]
         display_name: String,
     },
+    /// Listen for incoming P2P connections.
+    ///
+    /// Registers with the signaling server, binds a QUIC listener on
+    /// the specified port, and runs an accept loop. For each incoming
+    /// connection, reads a line from the first bidi stream and prints
+    /// it (Wave 2 behavior — Wave 3 will add reply logic).
+    Listen {
+        /// Signaling server base URL.
+        url: String,
+        /// Display name.
+        #[arg(short, long, default_value = "voip-cli-peer")]
+        display_name: String,
+        /// QUIC listen address.
+        #[arg(short, long, default_value = "0.0.0.0:4433")]
+        listen: String,
+    },
 }
 
 #[tokio::main]
@@ -75,6 +91,9 @@ async fn main() -> Result<()> {
         Commands::Whoami => commands::whoami().await,
         Commands::Register { url, display_name } => {
             commands::register(&url, &display_name).await
+        }
+        Commands::Listen { url, display_name, listen } => {
+            commands::listen(&url, &display_name, &listen).await
         }
     }
 }

@@ -4,6 +4,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use voip_client::peer::{Peer, PeerConfig, PeerIdentity};
 
 use crate::identity;
 
@@ -124,6 +125,92 @@ pub async fn register(url: &str, display_name: &str) -> Result<()> {
     println!("    ...");
     println!("  jwt saved to: {}", jwt_path.display());
 
+    Ok(())
+}
+
+/// `voip-cli listen <url> [--listen ADDR]` — register with signaling
+/// and accept incoming P2P QUIC connections.
+///
+/// Wave 2 behavior: for each incoming connection, accepts a bidi
+/// stream, reads bytes until the stream ends, prints them as UTF-8
+/// (lossy), and replies with a single line "ack: <n>".
+/// Wave 3 will replace this with a proper ping/pong protocol.
+pub async fn listen(url: &str, display_name: &str, listen_addr: &str) -> Result<()> {
+    let id = identity::load().context("no identity found. Run `voip-cli init` first.")?;
+    let peer_identity = PeerIdentity::from_hex(&id.signing_key, &id.verifying_key)
+        .context("failed to decode identity keypair")?;
+
+    let cfg = PeerConfig {
+        signaling_url: url.to_string(),
+        display_name: display_name.to_string(),
+        listen_addr: listen_addr.to_string(),
+    };
+
+    let peer = Peer::new(peer_identity, cfg)?;
+    let local = peer.local_addr()?;
+    println!("Listening for P2P QUIC on {}", local);
+    println!("Peer ID: {}", peer.peer_id());
+
+    // Register with signaling server
+    match peer.register().await {
+        Ok(resp) => {
+            println!("Registered with {} as '{}'", url, resp.peer_id);
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "registration failed (continuing in listen-only mode)");
+            eprintln!("warning: registration failed: {}", e);
+            eprintln!("(continuing in listen-only mode — calls from peers cannot find us without registration)");
+        }
+    }
+
+    println!("Waiting for incoming connections. Press Ctrl+C to stop.");
+
+    // Spawn a counter for ack replies
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let counter = std::sync::Arc::new(AtomicU64::new(0));
+
+    peer.run_accept_loop(move |conn| {
+        let counter = counter.clone();
+        async move {
+            // Accept a single bidi stream from the connecting peer
+            match conn.accept_bi().await {
+                Ok((mut send, mut recv)) => {
+                    use tokio::io::AsyncWriteExt;
+                    let mut buf = vec![0u8; 4096];
+                    let n = match recv.read(&mut buf).await {
+                        Ok(Some(n)) => n,
+                        Ok(None) => {
+                            // Stream ended with no data
+                            let remote = conn.remote_address();
+                            println!("[{}] connected but sent no data", remote);
+                            return;
+                        }
+                        Err(e) => {
+                            eprintln!("read error: {}", e);
+                            return;
+                        }
+                    };
+                    let text = String::from_utf8_lossy(&buf[..n]);
+                    let remote = conn.remote_address();
+                    println!("[{}] said: {}", remote, text.trim_end());
+
+                    // Reply with "ack: <n>"
+                    let n = counter.fetch_add(1, Ordering::SeqCst);
+                    let reply = format!("ack: {}\n", n);
+                    if let Err(e) = send.write_all(reply.as_bytes()).await {
+                        eprintln!("reply write error: {}", e);
+                    }
+                    let _ = send.finish();
+                }
+                Err(e) => {
+                    eprintln!("accept_bi error: {}", e);
+                }
+            }
+        }
+    })
+    .await?;
+
+    println!("Shutting down.");
     Ok(())
 }
 
