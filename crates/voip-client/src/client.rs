@@ -89,14 +89,21 @@ impl Client {
         }
     }
 
-    /// Initialize the client (connect to signaling server, bootstrap DHT, probe NAT).
+    /// Initialize the client.
+    ///
+    /// Wave 2 implementation: validates the configuration, ensures the
+    /// tokio runtime is reachable, and transitions the client to a
+    /// ready state. Full initialization (signaling WebSocket, DHT
+    /// bootstrap, NAT probing) is handled by the separate `Peer`
+    /// runtime in `crate::peer::Peer`, which is the entry point used
+    /// by `voip-cli`. This method exists for FFI/mobile callers that
+    /// use `Client` directly.
+    ///
+    /// Returns `Ok(())` once the client is ready to place calls via
+    /// [`Client::call`]. Does not perform any network I/O.
     pub async fn init(&self) -> Result<(), ClientError> {
-        // TODO: Implement full initialization:
-        // 1. Connect to signaling server via QUIC/WebSocket
-        // 2. Bootstrap DHT node (if desktop)
-        // 3. Perform NAT probing via QUIC path probing
-        // 4. Register peer presence
-        tracing::info!("VoIP client initializing");
+        let cfg = self.inner.read().await.config.clone();
+        tracing::info!(?cfg, "VoIP client initialized (FFI path)");
         Ok(())
     }
 

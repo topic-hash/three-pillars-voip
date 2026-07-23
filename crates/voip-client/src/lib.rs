@@ -29,6 +29,7 @@ pub mod masque;
 pub mod migration;
 pub mod moq;
 pub mod nat_probe;
+pub mod peer;
 pub mod peer_cache;
 pub mod pipeline;
 pub mod probe;
