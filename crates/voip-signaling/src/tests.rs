@@ -908,6 +908,121 @@ fn test_extract_client_ip_loopback() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// 4b. extract_client_ip_with_headers tests (REG-03: X-Forwarded-For)
+//
+// Regression: extract_client_ip() only used the socket peer address.
+// Behind a reverse proxy (Cloudflare, nginx, GitHub Codespaces port
+// forwarding) the returned IP was the proxy's IP, not the client's.
+// This broke NAT classification (spec/08 §8.1.4 /v1/myip) and subsequent
+// QUIC simultaneous open — the client's "reflexive IP" was wrong.
+//
+// Fix: add extract_client_ip_with_headers(addr, headers) that prefers
+// X-Forwarded-For (first IP, after stripping whitespace) when present
+// and valid; otherwise falls back to extract_client_ip(addr).
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_extract_client_ip_with_headers_no_xff_falls_back_to_socket() {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), 4242);
+    let headers = axum::http::HeaderMap::new();
+    let (ip, port, version) = state::extract_client_ip_with_headers(addr, &headers);
+    assert_eq!(ip, "198.51.100.7");
+    assert_eq!(port, 4242);
+    assert_eq!(version, 4);
+}
+
+#[test]
+fn test_extract_client_ip_with_headers_uses_xff_ipv4() {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    // Socket address is the proxy (e.g. 10.0.0.1), but XFF says real client is 203.0.113.42
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8443);
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        "x-forwarded-for",
+        "203.0.113.42".parse().expect("valid header value"),
+    );
+    let (ip, _port, version) = state::extract_client_ip_with_headers(addr, &headers);
+    assert_eq!(ip, "203.0.113.42");
+    assert_eq!(version, 4);
+}
+
+#[test]
+fn test_extract_client_ip_with_headers_uses_first_ip_in_xff_chain() {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    // XFF can be a comma-separated chain: "client, proxy1, proxy2".
+    // The FIRST entry is the original client; we must use that one.
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8443);
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        "x-forwarded-for",
+        "203.0.113.42, 10.0.0.1, 10.0.0.2"
+            .parse()
+            .expect("valid header value"),
+    );
+    let (ip, _port, _version) = state::extract_client_ip_with_headers(addr, &headers);
+    assert_eq!(ip, "203.0.113.42");
+}
+
+#[test]
+fn test_extract_client_ip_with_headers_strips_whitespace_in_xff() {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8443);
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        "x-forwarded-for",
+        "  203.0.113.42  ".parse().expect("valid header value"),
+    );
+    let (ip, _port, _version) = state::extract_client_ip_with_headers(addr, &headers);
+    assert_eq!(ip, "203.0.113.42");
+}
+
+#[test]
+fn test_extract_client_ip_with_headers_invalid_xff_falls_back_to_socket() {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    // If XFF is malformed (not a valid IP), fall back to socket address — never panic.
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), 4242);
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        "x-forwarded-for",
+        "not-an-ip".parse().expect("valid header value"),
+    );
+    let (ip, port, version) = state::extract_client_ip_with_headers(addr, &headers);
+    assert_eq!(ip, "198.51.100.7");
+    assert_eq!(port, 4242);
+    assert_eq!(version, 4);
+}
+
+#[test]
+fn test_extract_client_ip_with_headers_empty_xff_falls_back_to_socket() {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), 4242);
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        "x-forwarded-for",
+        "".parse().expect("valid header value"),
+    );
+    let (ip, port, version) = state::extract_client_ip_with_headers(addr, &headers);
+    assert_eq!(ip, "198.51.100.7");
+    assert_eq!(port, 4242);
+    assert_eq!(version, 4);
+}
+
+#[test]
+fn test_extract_client_ip_with_headers_xff_ipv6() {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8443);
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        "x-forwarded-for",
+        "2001:db8::1".parse().expect("valid header value"),
+    );
+    let (ip, _port, version) = state::extract_client_ip_with_headers(addr, &headers);
+    assert_eq!(ip, "2001:db8::1");
+    assert_eq!(version, 6);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // 5. /v1/proxies endpoint tests (with auth)
 // ═══════════════════════════════════════════════════════════════════════
 

@@ -471,8 +471,9 @@ pub async fn lookup_peer(
 )]
 pub async fn get_my_ip(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
 ) -> Json<MyIpResponse> {
-    let (ip, port, version) = crate::state::extract_client_ip(addr);
+    let (ip, port, version) = crate::state::extract_client_ip_with_headers(addr, &headers);
     let observed_at = crate::state::now_secs();
     Json(MyIpResponse {
         ip,

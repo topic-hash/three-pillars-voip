@@ -448,3 +448,50 @@ pub fn extract_client_ip(addr: SocketAddr) -> (String, u16, u8) {
     let version = if addr.is_ipv6() { 6 } else { 4 };
     (ip_str, addr.port(), version)
 }
+
+/// Extract the client's IP address, honoring `X-Forwarded-For` when present.
+///
+/// **REG-03 fix.** The plain `extract_client_ip()` function only inspects
+/// the TCP socket's peer address. When the signaling server sits behind a
+/// reverse proxy (Cloudflare, nginx, or GitHub Codespaces port forwarding),
+/// that peer address is the proxy's address, not the client's — so the
+/// `/v1/myip` endpoint returned the proxy IP and broke downstream NAT
+/// classification (`spec/08 §8.1.4`).
+///
+/// This variant accepts the request headers and, when a valid
+/// `X-Forwarded-For` header is present, returns the first IP in the chain
+/// (the original client per RFC 7239 §5.1). The port and IP version are
+/// derived from the parsed XFF IP when present, otherwise from the socket
+/// address.
+///
+/// # Defensive behavior
+///
+/// A malformed or empty `X-Forwarded-For` value MUST NOT panic — the
+/// function falls back to `extract_client_ip(addr)`. This is critical
+/// because the header is attacker-controlled.
+pub fn extract_client_ip_with_headers(
+    addr: SocketAddr,
+    headers: &axum::http::HeaderMap,
+) -> (String, u16, u8) {
+    // Try X-Forwarded-For first. Format: "client, proxy1, proxy2, ..."
+    // We want the first entry, trimmed of whitespace.
+    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        let first = xff.split(',').next().unwrap_or("").trim();
+        if !first.is_empty() {
+            // Try parsing as IPv4 or IPv6 — never panic on bad input.
+            if let Ok(ip) = first.parse::<std::net::IpAddr>() {
+                let version = if ip.is_ipv6() { 6 } else { 4 };
+                // The port from XFF is unreliable (proxies usually don't
+                // include it), so we keep the socket's port. The IP version
+                // follows the XFF IP, not the socket.
+                return (ip.to_string(), addr.port(), version);
+            }
+            // Malformed XFF → fall through to socket-based extraction.
+            tracing::warn!(
+                xff = %first,
+                "malformed X-Forwarded-For first entry; falling back to socket peer address"
+            );
+        }
+    }
+    extract_client_ip(addr)
+}
