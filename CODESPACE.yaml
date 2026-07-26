@@ -1,0 +1,117 @@
+# CODESPACE.yaml — codespacectl manifest for three-pillars-voip
+# https://github.com/topic-hash/codespacectl
+apiVersion: v1
+metadata:
+  name: three-pillars-voip
+  description: Minimal-relay P2P VoIP — Rust + QUIC + MoQ + MASQUE
+  repo: topic-hash/three-pillars-voip
+
+environment:
+  workingDir: /workspaces/three-pillars-voip
+  healthChecks:
+    - name: repo
+      command: ls /workspaces/three-pillars-voip/Cargo.toml
+      expectExitCode: 0
+      timeoutSecs: 5
+    - name: cargo
+      command: cargo --version
+      expectExitCode: 0
+      timeoutSecs: 10
+    - name: rust-toolchain
+      command: rustc --version
+      expectExitCode: 0
+      timeoutSecs: 10
+
+commands:
+  setup-rust:
+    description: Install Rust 1.95 (idempotent — skips if already installed)
+    command: |
+      if ! command -v cargo >/dev/null 2>&1; then
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.95 --profile minimal --no-modify-path
+        . "$HOME/.cargo/env"
+      fi
+      cargo --version
+      rustc --version
+    timeoutSecs: 300
+
+  build:
+    description: Build all crates (debug)
+    command: . "$HOME/.cargo/env" 2>/dev/null; cd {{workingDir}} && cargo build
+    timeoutSecs: 600
+    requiresHealth: [repo]
+
+  build-release:
+    description: Build all crates (release, optimized)
+    command: . "$HOME/.cargo/env" 2>/dev/null; cd {{workingDir}} && cargo build --release
+    timeoutSecs: 900
+    requiresHealth: [repo]
+
+  test:
+    description: Run all unit + integration tests
+    command: . "$HOME/.cargo/env" 2>/dev/null; cd {{workingDir}} && cargo test -- --test-threads=1
+    timeoutSecs: 900
+    requiresHealth: [repo]
+
+  test-lib:
+    description: Run library unit tests only (fast)
+    command: . "$HOME/.cargo/env" 2>/dev/null; cd {{workingDir}} && cargo test --lib -- --test-threads=1
+    timeoutSecs: 300
+    requiresHealth: [repo]
+
+  clippy:
+    description: Run clippy (warnings allowed for now — pre-existing issues)
+    command: . "$HOME/.cargo/env" 2>/dev/null; cd {{workingDir}} && cargo clippy
+    timeoutSecs: 300
+    requiresHealth: [repo]
+
+  fmt-check:
+    description: Verify code formatting
+    command: . "$HOME/.cargo/env" 2>/dev/null; cd {{workingDir}} && cargo fmt --check
+    timeoutSecs: 60
+
+  ping-pong-test:
+    description: Run the voip-cli ping-pong integration test (requires signaling server)
+    command: . "$HOME/.cargo/env" 2>/dev/null; cd {{workingDir}} && cargo test --package voip-cli --test ping_pong -- --test-threads=1
+    timeoutSecs: 300
+    requiresHealth: [repo]
+
+  run-signaling:
+    description: Run the voip-signaling server (foreground; Ctrl-C to stop)
+    command: . "$HOME/.cargo/env" 2>/dev/null; cd {{workingDir}} && cargo run -p voip-signaling
+    timeoutSecs: 3600
+    requiresHealth: [repo]
+
+  ls:
+    description: List repo root
+    command: ls -la {{workingDir}}
+    timeoutSecs: 5
+
+  git-log:
+    description: Show recent git log
+    command: cd {{workingDir}} && git log --oneline -5
+    timeoutSecs: 5
+
+  git-status:
+    description: Git status inside codespace
+    command: cd {{workingDir}} && git status
+    timeoutSecs: 10
+
+  uname:
+    description: Codespace OS info
+    command: uname -a
+    timeoutSecs: 5
+
+  spec-list:
+    description: List spec files
+    command: ls /workspaces/three-pillars-voip/spec/
+    timeoutSecs: 5
+
+  crates-list:
+    description: List crate names
+    command: ls /workspaces/three-pillars-voip/crates/
+    timeoutSecs: 5
+
+hooks:
+  preStop:
+    - command: pkill -f voip-signaling 2>/dev/null || true
+      timeoutSecs: 5

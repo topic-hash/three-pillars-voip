@@ -6,6 +6,52 @@ Built in Rust on QUIC + MoQ + MASQUE. No STUN. No ICE. No TURN.
 
 ---
 
+## Codespace Operations (agent-driven via `codespacectl`)
+
+This repo ships a [`CODESPACE.yaml`](CODESPACE.yaml) manifest for
+[`codespacectl`](https://github.com/topic-hash/codespacectl) — a single-binary
+Rust CLI that lets AI agents drive GitHub Codespaces reliably.
+
+### One-time setup
+
+```bash
+# Install codespacectl
+curl -L https://github.com/topic-hash/codespacectl/releases/latest/download/codespacectl-linux-amd64 \
+  -o /usr/local/bin/codespacectl && chmod +x $_
+
+# Set your GitHub PAT (fine-grained, `codespace` scope)
+export CODESPACECTL_TOKEN=ghp_xxx
+
+# Tell codespacectl where the vendored gh binary lives
+export CODESPACECTL_GH_BIN=/path/to/codespacectl/tools/bin/gh
+```
+
+### Workflow
+
+```bash
+codespacectl discover                          # list all codespaces
+codespacectl switch --codespace <name>         # set current codespace
+codespacectl --manifest ./CODESPACE.yaml connect   # start + SSH + health
+
+codespacectl exec setup-rust                   # install Rust 1.95 (idempotent)
+codespacectl exec build                        # cargo build (all 6 crates)
+codespacectl exec build-release                # cargo build --release
+codespacectl exec test                         # cargo test -- --test-threads=1
+codespacectl exec test-lib                     # library unit tests only (fast)
+codespacectl exec clippy                       # cargo clippy
+codespacectl exec fmt-check                    # cargo fmt --check
+codespacectl exec ping-pong-test               # voip-cli integration test
+codespacectl exec spec-list                    # list spec/ files
+codespacectl exec crates-list                  # list crates/ directories
+codespacectl exec git-log                      # recent commits
+codespacectl stop                              # graceful shutdown
+```
+
+All commands support `--json` for structured output. See
+[the codespacectl docs](https://github.com/topic-hash/codespacectl/blob/main/docs/CLI_REFERENCE.md)
+for the full envelope schema and 12-subcommand reference.
+
+
 ## What Is This?
 
 Three Pillars VoIP is a VoIP system that maximizes direct peer-to-peer connections and minimizes relay dependency. When direct P2P fails, MASQUE CONNECT-UDP (RFC 9298) automatically tunnels media through HTTPS proxies — traffic indistinguishable from ordinary web browsing. No user action required. No TURN servers. No metadata leaks.
