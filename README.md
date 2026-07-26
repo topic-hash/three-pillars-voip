@@ -265,6 +265,6 @@ This architecture was originally conceived as "relay-free," but honest engineeri
 
 ---
 
-## License
+## License:
 
-MIT
+Apache 2.0 (effective from 2026-07-26). Previously MIT.
